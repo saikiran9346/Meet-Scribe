@@ -4,7 +4,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const apiRoutes = require("./routes/api");
-const { verifyToken } = require("./middleware/auth");
+// const { verifyToken } = require("./middleware/auth"); ❌ disabled for now
 
 console.log(
   "Service account loaded:",
@@ -18,33 +18,10 @@ const app = express();
 const server = http.createServer(app);
 
 /* =======================
-   ✅ CORS (FINAL FIX)
+   ✅ CORS (SIMPLIFIED FIX)
    ======================= */
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // allow requests with no origin (Postman, mobile apps)
-      if (!origin) return callback(null, true);
-
-      // allow Netlify, localhost, ngrok
-      if (
-        origin.includes("netlify.app") ||
-        origin.includes("localhost") ||
-        origin.includes("ngrok-free.dev")
-      ) {
-        return callback(null, true);
-      }
-
-      console.log("❌ Blocked by CORS:", origin);
-      return callback(new Error("CORS blocked"));
-    },
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    credentials: true,
-  })
-);
-
-// handle preflight requests
+app.use(cors()); // 🔥 allow all (for now)
 app.options("*", cors());
 
 app.use(express.json());
@@ -55,7 +32,7 @@ app.use(express.json());
 
 const io = new Server(server, {
   cors: {
-    origin: "*", // safe for dev (can restrict later)
+    origin: "*",
     methods: ["GET", "POST"],
   },
 });
@@ -76,7 +53,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// Public share (no auth)
+// PUBLIC SHARE
 app.get("/api/share/:sessionId", async (req, res) => {
   try {
     const fs = require("fs").promises;
@@ -118,8 +95,12 @@ app.get("/api/share/:sessionId", async (req, res) => {
   }
 });
 
-// Protected routes
-app.use("/api", verifyToken, apiRoutes);
+/* =======================
+   🚀 MAIN API (NO AUTH FOR NOW)
+   ======================= */
+
+// 🔥 IMPORTANT: removed verifyToken
+app.use("/api", apiRoutes);
 
 /* =======================
    ✅ SOCKET EVENTS
