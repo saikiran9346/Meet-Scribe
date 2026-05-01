@@ -17,56 +17,66 @@ global.tempMeetingData = {};
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Allowed origins
-const allowedOrigins = [
-  "https://meetbotscribe.netlify.app",
-  "http://localhost:3000",
-];
+/* =======================
+   ✅ CORS (FINAL FIX)
+   ======================= */
 
-// ✅ CORS FIX (MAIN FIX)
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (!origin) return callback(null, true); // allow Postman
+      // allow requests with no origin (Postman, mobile apps)
+      if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
+      // allow Netlify, localhost, ngrok
+      if (
+        origin.includes("netlify.app") ||
+        origin.includes("localhost") ||
+        origin.includes("ngrok-free.dev")
+      ) {
         return callback(null, true);
-      } else {
-        return callback(new Error("CORS blocked: " + origin));
       }
+
+      console.log("❌ Blocked by CORS:", origin);
+      return callback(new Error("CORS blocked"));
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
 
-// ✅ VERY IMPORTANT (handles preflight requests)
+// handle preflight requests
 app.options("*", cors());
 
 app.use(express.json());
 
-// ✅ Socket setup (AFTER cors defined)
+/* =======================
+   ✅ SOCKET.IO
+   ======================= */
+
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: "*", // safe for dev (can restrict later)
     methods: ["GET", "POST"],
   },
 });
 
-// Make io available in routes
 app.set("io", io);
 
-// ✅ Root route
+/* =======================
+   ✅ ROUTES
+   ======================= */
+
+// Root route
 app.get("/", (req, res) => {
   res.send("Backend is running 🚀");
 });
 
-// ✅ Health check
+// Health check
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// ─── PUBLIC SHARE (no auth required) ─────────────────────────
+// Public share (no auth)
 app.get("/api/share/:sessionId", async (req, res) => {
   try {
     const fs = require("fs").promises;
@@ -108,10 +118,13 @@ app.get("/api/share/:sessionId", async (req, res) => {
   }
 });
 
-// 🔒 Protected API routes
+// Protected routes
 app.use("/api", verifyToken, apiRoutes);
 
-// ✅ Socket.IO
+/* =======================
+   ✅ SOCKET EVENTS
+   ======================= */
+
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
@@ -125,7 +138,10 @@ io.on("connection", (socket) => {
   });
 });
 
-// ✅ Server start
+/* =======================
+   ✅ START SERVER
+   ======================= */
+
 const PORT = process.env.PORT || 8080;
 
 server.listen(PORT, "0.0.0.0", () => {
