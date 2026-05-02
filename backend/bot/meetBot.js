@@ -65,7 +65,7 @@ class MeetBot {
     }
 
     const launchOptions = {
-      headless: process.env.HEADLESS === "true" ? "new" : false,
+      headless: false,
       userDataDir: userDataDir,
       executablePath: browserPath,
       args: [
@@ -83,7 +83,6 @@ class MeetBot {
         "--enable-usermedia-screen-capturing",
         "--force-device-scale-factor=1",
         "--mute-audio",
-        `--user-data-dir=${userDataDir}`,
       ],
       ignoreDefaultArgs: ["--enable-automation"],
     };
