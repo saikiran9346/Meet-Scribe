@@ -10,11 +10,11 @@
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Express](https://img.shields.io/badge/Express-4.18-000000?style=for-the-badge&logo=express&logoColor=white)](https://expressjs.com/)
 [![Firebase](https://img.shields.io/badge/Firebase_Firestore-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](https://firebase.google.com/)
-[![Deepgram](https://img.shields.io/badge/Deepgram-STT-13EF93?style=for-the-badge&logo=deepgram&logoColor=black)](https://deepgram.com/)
+[![Deepgram](https://img.shields.io/badge/Deepgram-Live_STT-13EF93?style=for-the-badge&logo=deepgram&logoColor=black)](https://deepgram.com/)
 [![LangChain](https://img.shields.io/badge/LangChain-AI_Orchestration-1C3C3C?style=for-the-badge&logo=langchain&logoColor=white)](https://www.langchain.com/)
 [![Groq](https://img.shields.io/badge/Groq-Ultra--Fast_LLMs-F05A28?style=for-the-badge)](https://groq.com/)
 
-[Features](#-key-features) • [Architecture](#-architecture) • [Tech Stack](#-tech-stack) • [Quick Start](#-quick-start-guide) • [API Reference](#-api-reference) • [Configuration](#-environment-variables)
+[Features](#-key-features) • [Architecture](#-architecture) • [Quick Start Guide](#-quick-start-guide) • [API Reference](#-api-reference) • [Configuration](#-environment-variables)
 
 ---
 
@@ -24,7 +24,7 @@
 
 **MeetScribe** is an end-to-end meeting intelligence platform designed to eliminate manual note-taking and make conversations actionable. 
 
-Using an autonomous headless/headed browser bot powered by **Puppeteer**, MeetScribe connects to Google Meet calls, captures incoming real-time audio streams, converts voice to text using **Deepgram**, and generates structured meeting intelligence (Key Decisions, Action Items, Speaker Breakdowns, Sentiment Analysis) through **LangChain & Groq/Gemini LLMs**.
+Using an autonomous browser bot powered by **Puppeteer**, MeetScribe connects to Google Meet calls, captures incoming real-time audio streams, converts voice to text using **Deepgram**, and generates structured meeting intelligence (Key Decisions, Action Items, Speaker Breakdowns, Sentiment Analysis) through **LangChain & Groq/Gemini LLMs**.
 
 All meetings are saved to **Firebase Firestore** with instant search, on-demand **PDF export**, shareable public links, and an **interactive meeting chatbot** that remembers every word spoken.
 
@@ -34,7 +34,7 @@ All meetings are saved to **Firebase Firestore** with instant search, on-demand 
 
 | Feature | Description |
 | :--- | :--- |
-| 🤖 **Autonomous Meet Bot** | Puppeteer-driven bot that joins Google Meet links, handles pre-join screens, mutes mic/cam, and captures tab audio. |
+| 🤖 **Autonomous Meet Bot** | Puppeteer-driven bot that automatically detects installed browsers (Chrome, Brave, Edge), joins Google Meet links, mutes mic/cam, and captures tab audio streams. |
 | 🎙️ **Live Real-Time Transcription** | Streams audio over WebSockets to **Deepgram STT** with live updates streamed directly to the frontend via **Socket.IO**. |
 | 📝 **Structured AI Summaries** | Employs high-speed LLMs (Groq LLaMA / Gemini) to extract executive overviews, key decisions, and assigned action items. |
 | 🎯 **Action Item Tracker** | Automatically parses tasks, assignees, and priority levels (`high`, `medium`, `low`) from conversations. |
@@ -101,7 +101,7 @@ flowchart LR
 
 ### **Backend**
 - **Runtime**: Node.js & Express.js
-- **Bot Automation**: Puppeteer & Chromium
+- **Bot Automation**: Puppeteer (Auto browser detection, zero-configuration)
 - **Speech-to-Text**: Deepgram SDK (WebSocket Audio Stream)
 - **AI & LLM Orchestration**: LangChain, Groq SDK (`llama-3.3-70b-versatile` / `mixtral`), Google GenAI
 - **Database & Auth**: Firebase Admin SDK & Google Cloud Firestore
@@ -112,28 +112,30 @@ flowchart LR
 
 ## 🚀 Quick Start Guide
 
+Follow these steps to get MeetScribe running locally on your machine.
+
 ### Prerequisites
-- **Node.js**: v18.0.0 or higher ([Download](https://nodejs.org/))
-- **Google Chrome**: Installed on host machine
-- **API Keys**:
-  - [Deepgram API Key](https://console.deepgram.com/)
-  - [Groq API Key](https://console.groq.com/) or [Google Gemini API Key](https://aistudio.google.com/)
-  - [Firebase Project](https://console.firebase.google.com/) (Firestore enabled + Service Account JSON)
+- **Node.js**: v18.0.0 or higher ([Download Node.js](https://nodejs.org/))
+- **Google Chrome** (or Brave / Edge): Installed on your machine
+- **Accounts & API Keys**:
+  - [Deepgram API Key](https://console.deepgram.com/) (For real-time speech-to-text)
+  - [Groq API Key](https://console.groq.com/) (For ultra-fast summary generation)
+  - [Firebase Project](https://console.firebase.google.com/) (For Firestore database and Authentication)
 
 ---
 
 ### Step 1: Clone Repository & Install Dependencies
 
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/saikiran9346/Meet-Scribe.git
 cd Meet-Scribe
 
-# Install backend packages
+# 2. Install backend dependencies
 cd backend
 npm install
 
-# Install frontend packages
+# 3. Install frontend dependencies
 cd ../frontend
 npm install
 cd ..
@@ -143,87 +145,92 @@ cd ..
 
 ### Step 2: Configure Environment Variables
 
-1. **Backend Environment**: Create `backend/.env`
-   ```env
-   PORT=8080
-   FRONTEND_URL=http://localhost:3000
-   DEEPGRAM_API_KEY=your_deepgram_api_key_here
-   GROQ_API_KEY=your_groq_api_key_here
-   CHROME_EXECUTABLE_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
-   CHROME_PROFILE_PATH=C:\Users\<YourUsername>\AppData\Local\Google\Chrome\User Data\BotProfile
-   HEADLESS=true
-   ```
-
-2. **Frontend Environment**: Create `frontend/.env`
-   ```env
-   REACT_APP_API_URL=http://localhost:8080
-   REACT_APP_FIREBASE_API_KEY=your_firebase_api_key
-   REACT_APP_FIREBASE_AUTH_DOMAIN=your_project.firebaseapp.com
-   REACT_APP_FIREBASE_PROJECT_ID=your_project_id
-   REACT_APP_FIREBASE_STORAGE_BUCKET=your_project.firebasestorage.app
-   REACT_APP_FIREBASE_MESSAGING_SENDER_ID=your_messaging_sender_id
-   REACT_APP_FIREBASE_APP_ID=your_app_id
-   ```
-
-3. **Firebase Service Account**:
-   Place your Firebase admin credentials file at the project root:
-   ```
-   meet-scribe/
-   └── serviceAccount.json
-   ```
-
----
-
-### Step 3: Configure Chrome Bot Profile (One-Time)
-
-To allow the Puppeteer bot to join Google Meet sessions smoothly without repeating Google login challenges:
-
-```bash
-# Launch Chrome with the dedicated bot profile directory:
-# Windows:
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="C:\Users\<YourUsername>\AppData\Local\Google\Chrome\User Data\BotProfile"
-
-# macOS:
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --user-data-dir="~/Library/Application Support/Google/Chrome/BotProfile"
-
-# Linux:
-google-chrome --user-data-dir="~/.config/google-chrome/BotProfile"
+#### A. Backend Environment (`backend/.env`)
+Create a `.env` file in the `backend/` directory (or copy from `.env.example`):
+```env
+PORT=8080
+FRONTEND_URL=http://localhost:3000
+DEEPGRAM_API_KEY=your_deepgram_api_key_here
+GROQ_API_KEY=your_groq_api_key_here
+HEADLESS=true
 ```
-> **Action**: Sign in once with the Google account you wish the bot to use, grant microphone permissions, and close the browser.
+
+> **Note**: MeetScribe automatically detects your installed browser (Chrome, Brave, or Edge) and creates dynamic temporary profiles on demand. **No manual path configuration or manual profile setup is required!**
+
+#### B. Frontend Environment (`frontend/.env`)
+Create a `.env` file in the `frontend/` directory (or copy from `frontend/.env.example`):
+```env
+REACT_APP_API_URL=http://localhost:8080
+REACT_APP_FIREBASE_API_KEY=your_firebase_api_key
+REACT_APP_FIREBASE_AUTH_DOMAIN=your_project_id.firebaseapp.com
+REACT_APP_FIREBASE_PROJECT_ID=your_project_id
+REACT_APP_FIREBASE_STORAGE_BUCKET=your_project_id.firebasestorage.app
+REACT_APP_FIREBASE_MESSAGING_SENDER_ID=your_messaging_sender_id
+REACT_APP_FIREBASE_APP_ID=your_firebase_app_id
+```
+
+#### C. Firebase Service Account Key
+1. In the [Firebase Console](https://console.firebase.google.com/), go to **Project Settings** &rarr; **Service Accounts**.
+2. Click **Generate New Private Key** to download your JSON credentials.
+3. Rename the downloaded file to `serviceAccount.json` and place it in the project root:
+```
+meet-scribe/
+├── backend/
+├── frontend/
+├── serviceAccount.json   <-- (Place here)
+└── README.md
+```
 
 ---
 
-### Step 4: Firestore Index Setup
+### Step 3: Configure Firestore Database & Index
 
-In the [Firebase Console](https://console.firebase.google.com):
-1. Navigate to **Firestore Database** &rarr; **Indexes** &rarr; **Composite Indexes**.
-2. Click **Create Index** (Structured Index):
+1. In the [Firebase Console](https://console.firebase.google.com/), enable **Firestore Database** in test/production mode.
+2. Go to **Firestore Database** &rarr; **Indexes** &rarr; **Composite Indexes** &rarr; **Create Index**:
    - **Collection ID**: `meetings`
    - **Fields**:
      - `userId` &rarr; `Ascending`
      - `createdAt` &rarr; `Descending`
    - **Query Scope**: `Collection`
-3. Click **Create** and wait until status becomes **Enabled**.
+3. Click **Create Index** (takes 1–2 minutes to build).
 
 ---
 
-### Step 5: Run Application Locally
+### Step 4: Run the Application
 
 Open two terminal windows:
 
-**Terminal 1 (Backend Server):**
+#### **Terminal 1: Start Backend Server**
 ```bash
 cd backend
 npm start
-# Runs on http://localhost:8080
 ```
+*Server starts on `http://localhost:8080`*
 
-**Terminal 2 (Frontend Client):**
+#### **Terminal 2: Start Frontend Client**
 ```bash
 cd frontend
 npm start
-# Opens http://localhost:3000
 ```
+*Web app opens automatically at `http://localhost:3000`*
+
+---
+
+## 💡 How to Use MeetScribe
+
+1. **Sign In**: Open `http://localhost:3000` and sign in with your Google account.
+2. **Deploy Bot**:
+   - Copy any Google Meet link (e.g. `https://meet.google.com/abc-defg-hij`).
+   - Paste it into the MeetScribe launchpad and click **Deploy Bot**.
+3. **Live Session**:
+   - The bot will join the meeting, mute its mic/camera, and stream real-time transcripts directly to your dashboard.
+4. **Stop & Summarize**:
+   - Click **Stop & Summarize**.
+   - MeetScribe generates an executive overview, action items with assignees, key decisions, and speaker breakdowns.
+5. **Chat, Share & Export**:
+   - Converse with the meeting context using the **AI Chatbot**.
+   - Generate a **read-only public share link** for teammates.
+   - Click **PDF** to download a formatted meeting report.
 
 ---
 
@@ -295,7 +302,7 @@ meet-scribe/
 │   ├── package.json              # Frontend dependencies
 │   └── .env                      # Frontend environment settings
 │
-├── .env.example                  # Environment configuration template
+├── .env.example                  # Backend environment template
 ├── .gitignore                    # Git security & build exclusion rules
 ├── DEPLOYMENT-GUIDE.md           # Production deployment instructions
 └── README.md                     # Comprehensive project documentation
@@ -305,7 +312,7 @@ meet-scribe/
 
 ## 🔒 Security & Privacy
 
-- **Protected Secrets**: Sensitive files like `.env`, `serviceAccount.json`, and `.pem` certificates are excluded via `.gitignore`.
+- **Protected Secrets**: Sensitive files like `.env`, `serviceAccount.json`, and `.pem` certificates are strictly excluded via `.gitignore`.
 - **User Isolation**: Firestore documents and meeting records are keyed and scoped to individual Firebase `userId`s.
 - **Audio Capture Safety**: Audio streams are only captured during active sessions and converted to text; no raw ambient audio is permanently stored without consent.
 - **Stateless Tokens**: API requests utilize Firebase ID tokens (`Bearer <token>`) for secure stateless authentication.
