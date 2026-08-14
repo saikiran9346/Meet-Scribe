@@ -11,8 +11,11 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
-# Firebase service account (contains credentials)
-serviceAccount.json
+# Firebase service account & private keys (contains credentials)
+serviceAccount*.json
+meetscribe-*.json
+*.pem
+*.key
 
 # Logs
 *.log
@@ -102,7 +105,6 @@ jspm_packages/
 
 # Gatsby files
 .cache/
-public
 
 # Storybook build outputs
 .out

@@ -1,5 +1,6 @@
+const path = require("path");
 const admin = require("firebase-admin");
-const serviceAccount = require("../serviceAccount.json");
+const serviceAccount = require(path.resolve(__dirname, "..", "..", "serviceAccount.json"));
 
 if (!admin.apps.length) {
   admin.initializeApp({

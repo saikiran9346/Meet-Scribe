@@ -8,14 +8,16 @@ import { auth } from "../firebase";
 const BASE = process.env.REACT_APP_API_URL || "http://localhost:8080";
 
 const STATUS_MAP = {
-  launching:   { label: "Launching browser",    cls: "status-loading" },
-  navigating:  { label: "Opening Meet link",     cls: "status-loading" },
-  joining:     { label: "Joining meeting",       cls: "status-loading" },
-  joined:      { label: "Bot joined",            cls: "status-active"  },
-  listening:   { label: "Live · Listening",      cls: "status-active"  },
-  summarizing: { label: "Generating summary...", cls: "status-loading" },
-  stopped:     { label: "Session ended",         cls: "status-idle"    },
-  error:       { label: "Error occurred",        cls: "status-error"   },
+  launching:         { label: "Starting browser...",                  cls: "status-loading" },
+  "waiting-signin": { label: "Please sign in to Google in the browser window!", cls: "status-loading" },
+  success:           { label: "Signed in!",                          cls: "status-active"  },
+  navigating:        { label: "Opening Meet link...",                cls: "status-loading" },
+  joining:           { label: "Please click Join in browser!",      cls: "status-loading" },
+  joined:            { label: "In Meeting · Transcribing",          cls: "status-active"  },
+  listening:         { label: "Live · Listening",                   cls: "status-active"  },
+  summarizing:       { label: "Generating summary...",             cls: "status-loading" },
+  stopped:           { label: "Session ended",                      cls: "status-idle"    },
+  error:             { label: "Error occurred",                     cls: "status-error"   },
 };
 
 export default function Session() {
@@ -35,7 +37,10 @@ export default function Session() {
   const cfg    = STATUS_MAP[status] || STATUS_MAP.launching;
 
   useEffect(() => {
-    const socket = io(BASE);
+    const socket = io(BASE, {
+    transports: ["websocket"],   // ✅ FIX
+    withCredentials: false,
+  });
     socketRef.current = socket;
     socket.emit("join-session", sessionId);
 

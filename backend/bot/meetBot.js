@@ -23,6 +23,7 @@ class MeetBot {
     this._lastEntryId = null;
     this.chunksSent = 0;
     this._audioQueue = []; // Buffer for audio chunks before Deepgram connects
+    this.userDataDir = null;
   }
 
   emit(event, data) {
@@ -59,14 +60,17 @@ class MeetBot {
     this.emit("bot-status", { status: "launching", message: "Starting browser..." });
 
     const browserPath = process.env.CHROME_EXECUTABLE_PATH || this._detectBrowser();
-    const userDataDir = process.env.CHROME_PROFILE_PATH;
-    if (!userDataDir) {
-      throw new Error("CHROME_PROFILE_PATH environment variable is required");
+    if (!browserPath) {
+      throw new Error("Chrome or Brave not found. Set CHROME_EXECUTABLE_PATH if needed.");
     }
 
+    this.userDataDir = path.join(os.tmpdir(), `meet-scribe-profile-${Date.now()}-${uuidv4()}`);
+    fs.mkdirSync(this.userDataDir, { recursive: true });
+    console.log("🧪 Launching Chrome with a fresh temp profile:", this.userDataDir);
+
     const launchOptions = {
-      headless: process.env.HEADLESS === "true" ? "new" : false,
-      userDataDir: userDataDir,
+      headless: false,
+      userDataDir: this.userDataDir,
       executablePath: browserPath,
       args: [
         "--no-sandbox",
@@ -83,7 +87,6 @@ class MeetBot {
         "--enable-usermedia-screen-capturing",
         "--force-device-scale-factor=1",
         "--mute-audio",
-        `--user-data-dir=${userDataDir}`,
       ],
       ignoreDefaultArgs: ["--enable-automation"],
     };
@@ -226,11 +229,62 @@ class MeetBot {
       console.log("✅ WebRTC interceptor installed");
     });
 
+    await this._signInToGoogle();
     await this._joinMeeting();
   }
 
+  async _signInToGoogle() {
+    console.log("🔐 Opening Google sign-in for user...");
+    this.emit("bot-status", {
+      status: "waiting-signin",
+      message: "Please sign in with YOUR Google account in the browser window that just opened.",
+    });
+
+    try {
+      await this.page.goto(
+        "https://accounts.google.com/ServiceLogin?continue=https://www.google.com",
+        { waitUntil: "networkidle2", timeout: 30000 }
+      );
+    } catch (_) {}
+
+    await this.sleep(2000);
+    console.log("⏳ Waiting for user to sign in manually...");
+
+    const MAX_WAIT = 5 * 60 * 1000;
+    const CHECK_INTERVAL = 2000;
+    let elapsed = 0;
+
+    while (elapsed < MAX_WAIT) {
+      try {
+        const url = this.page.url();
+        if (url.includes("google.com") && !url.includes("accounts.google.com")) {
+          console.log("✅ User signed in!");
+          this.emit("bot-status", {
+            status: "success",
+            message: "Signed in! Opening Meet link now...",
+          });
+          await this.sleep(2000);
+          return;
+        }
+      } catch (_) {}
+
+      await this.sleep(CHECK_INTERVAL);
+      elapsed += CHECK_INTERVAL;
+
+      if (elapsed % 30000 === 0) {
+        this.emit("bot-status", {
+          status: "waiting-signin",
+          message: `Waiting for sign-in... (${Math.floor(elapsed / 1000)}s) — Please sign in with your Google account`,
+        });
+      }
+    }
+
+    console.log("⚠️ Sign-in timeout");
+    await this.sleep(2000);
+  }
+
   async _joinMeeting() {
-    this.emit("bot-status", { status: "joining", message: "Opening Google Meet..." });
+    this.emit("bot-status", { status: "navigating", message: "Opening Google Meet..." });
 
     try {
       await this.page.goto(this.meetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -293,105 +347,64 @@ class MeetBot {
 
       await this.sleep(1500);
 
-      // Click join — prioritize "Join now"
-      let joined = false;
-      let joinType = "";
-
-      const result = await this.page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll("button"));
-        for (const btn of buttons) {
-          const text = btn.innerText?.trim().toLowerCase() || "";
-          const rect = btn.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0 && !btn.disabled && text === "join now") {
-            btn.click();
-            return "join now";
-          }
-        }
-        for (const btn of buttons) {
-          const text = btn.innerText?.trim().toLowerCase() || "";
-          const rect = btn.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0 && !btn.disabled && text === "ask to join") {
-            btn.click();
-            return "ask to join";
-          }
-        }
-        return null;
-      }).catch(() => null);
-
-      if (result) {
-        joined = true;
-        joinType = result;
-        console.log("✅ Clicked:", result);
-      }
-
-      if (!joined) {
-        this.emit("bot-status", { status: "error", message: "Could not find join button." });
-        return;
-      }
-
-      await this.sleep(8000);
-
-      if (joinType === "join now") {
-        console.log("✅ Joined open meeting directly!");
-        this.emit("bot-status", { status: "joined", message: "Bot joined! Listening..." });
-        await this.sleep(2000);
-        await this._startTranscription();
-        return;
-      }
-
-      // Wait to be admitted
-      console.log("⏳ Waiting to be admitted...");
       this.emit("bot-status", {
         status: "joining",
-        message: "Waiting to be admitted — please admit 'AI Scribe' from your meeting",
+        message: "Please click 'Join now' in the browser window!",
       });
 
-      let admitted = false;
-      for (let i = 0; i < 100; i++) {
+      console.log("⏳ Waiting for user to click Join...");
+
+      let inMeeting = false;
+      for (let i = 0; i < 150; i++) {
         await this.sleep(2000);
         try {
           const state = await this.page.evaluate(() => {
             const text = document.body?.innerText || "";
             return {
-              hasCallEnd: text.includes("Leave call"),
-              hasMute: text.includes("Mute microphone") || text.includes("Turn on microphone"),
-              hasWaiting: text.includes("Still trying to get in") || text.includes("Waiting for the host"),
-              leftMeeting: text.includes("You left") || text.includes("You've been removed"),
+              inMeeting:
+                text.includes("Leave call") ||
+                text.includes("Mute microphone") ||
+                text.includes("Turn on microphone"),
+              leftMeeting: text.includes("You left") || text.includes("Call ended"),
             };
           });
 
-          console.log(`⏳ ${i + 1}: callEnd=${state.hasCallEnd} mute=${state.hasMute} waiting=${state.hasWaiting}`);
-
-          if (state.hasWaiting) {
+          if (state.inMeeting) {
+            inMeeting = true;
+            console.log("✅ User joined meeting!");
             this.emit("bot-status", {
-              status: "joining",
-              message: "Waiting to be admitted — please click 'Admit' in your Chrome meeting",
+              status: "joined",
+              message: "Joined! Transcription starting...",
             });
-          }
-
-          if ((state.hasCallEnd || state.hasMute) && !state.hasWaiting) {
-            admitted = true;
-            console.log("✅ Admitted!");
             break;
           }
 
           if (state.leftMeeting) {
-            this.emit("bot-status", { status: "error", message: "Bot was removed." });
+            this.emit("bot-status", {
+              status: "error",
+              message: "Meeting ended.",
+            });
             return;
           }
-        } catch (err) {
-          if (err.message.includes("detached")) await this.sleep(1000);
-        }
+
+          if (i % 15 === 0 && i > 0) {
+            this.emit("bot-status", {
+              status: "joining",
+              message: "Please click Join in the browser window!",
+            });
+          }
+        } catch (_) {}
       }
 
-      if (admitted) {
-        await this.sleep(3000);
-        this.emit("bot-status", { status: "joined", message: "Bot joined! Listening..." });
+      if (inMeeting) {
+        await this.sleep(2000);
+        await this._enableCaptions();
+        await this.sleep(2000);
         await this._startTranscription();
       } else {
         this.emit("bot-status", {
           status: "error",
-          message: "Bot was not admitted. Please admit 'AI Scribe'.",
+          message: "Timed out waiting for you to join the meeting.",
         });
       }
     } catch (err) {
@@ -402,21 +415,180 @@ class MeetBot {
 
   async _startTranscription() {
     console.log("🎤 Starting transcription...");
+    // Ensure remote audio elements are unmuted and playing
+    await this._ensureAudioPlaying();
+
+    // Wait for at least one incoming audio track from the page's RTCPeerConnection
+    const MAX_WAIT = 20000; // 20s
+    const CHECK_INTERVAL = 1000;
+    let waited = 0;
+    while (waited < MAX_WAIT) {
+      try {
+        const count = await this.page.evaluate(() => window._audioTrackCount || 0);
+        if (count > 0) {
+          console.log(`🎧 Incoming audio tracks detected: ${count}`);
+          break;
+        }
+      } catch (_) {}
+      await this.sleep(CHECK_INTERVAL);
+      waited += CHECK_INTERVAL;
+    }
+
+    if (waited >= MAX_WAIT) {
+      console.warn("⚠️ No incoming audio tracks detected before transcription start");
+      this.emit("bot-status", { status: "error", message: "No audio captured from meeting (check Meet audio settings)." });
+    }
+
     await this._connectDeepgram();
     this._startParticipantScraper();
     await this._enableCaptions();
     console.log("✅ Transcription pipeline ready");
   }
 
+  async _ensureAudioPlaying() {
+    try {
+      await this.page.evaluate(() => {
+        try {
+          // Unmute any audio/video elements and set volume
+          const mediaEls = Array.from(document.querySelectorAll('audio, video'));
+          mediaEls.forEach((el) => {
+            try {
+              el.muted = false;
+              if (typeof el.volume === 'number') el.volume = 1.0;
+              if (el.paused) {
+                el.play().catch(() => {});
+              }
+            } catch (e) {}
+          });
+
+          // Also unmute any element with autoplay policies
+          const audios = document.getElementsByTagName('audio');
+          for (const a of audios) {
+            try { a.muted = false; a.volume = 1.0; a.play().catch(() => {}); } catch (e) {}
+          }
+        } catch (e) {}
+      });
+      console.log('🔊 Ensured page audio elements are unmuted and playing');
+    } catch (err) {
+      console.warn('⚠️ Failed to ensure audio playing:', err.message);
+    }
+  }
+
   async _enableCaptions() {
-    console.log("💬 Enabling captions via keyboard shortcut...");
+    console.log("💬 Enabling captions...");
     try {
       await this.sleep(2000);
 
-      // Use keyboard shortcut C to toggle captions
-      await this.page.keyboard.press("c");
-      await this.sleep(1000);
-      console.log("✅ Caption shortcut pressed (C)");
+      const captionEnabled = await this.page.evaluate(async () => {
+        const clickIfVisible = (element) => {
+          if (!element) return false;
+          const rect = element.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            element.click();
+            return true;
+          }
+          return false;
+        };
+
+        const hasCaptionButton = () => {
+          const buttons = Array.from(document.querySelectorAll("button, div[role='button'], span[role='button']"));
+          for (const button of buttons) {
+            const text = (button.innerText || "").trim().toLowerCase();
+            const aria = (button.getAttribute("aria-label") || "").trim().toLowerCase();
+            if (
+              aria.includes("turn on captions") ||
+              aria.includes("turn captions on") ||
+              text.includes("turn on captions") ||
+              text.includes("captions") && aria.includes("closed captions")
+            ) {
+              return button;
+            }
+          }
+          return null;
+        };
+
+        const captionButton = hasCaptionButton();
+        if (captionButton) {
+          console.log("🔎 Found captions button, clicking it");
+          clickIfVisible(captionButton);
+          return true;
+        }
+
+        const moreMenu = Array.from(document.querySelectorAll("button, div[role='button'], span[role='button']")).find((button) => {
+          const aria = (button.getAttribute("aria-label") || "").trim().toLowerCase();
+          const text = (button.innerText || "").trim().toLowerCase();
+          return aria.includes("more options") || text === "more options" || text === "more";
+        });
+
+        if (moreMenu && clickIfVisible(moreMenu)) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          const menuItem = Array.from(document.querySelectorAll("button, div[role='button'], span[role='button']")).find((item) => {
+            const text = (item.innerText || "").trim().toLowerCase();
+            return text.includes("turn on captions") || text.includes("captions");
+          });
+          if (menuItem && clickIfVisible(menuItem)) {
+            console.log("🔎 Found captions menu item, clicked it");
+            return true;
+          }
+        }
+
+        return false;
+      });
+
+      if (!captionEnabled) {
+        console.log("⚠️ Caption button not found, using keyboard shortcut C");
+        await this.page.keyboard.press("c");
+        await this.sleep(1000);
+      } else {
+        await this.sleep(2000);
+      }
+
+      console.log("✅ Captions toggle attempted; verifying captions visible...");
+
+      // Wait for caption container to appear (verify captions are on)
+      const captionsFound = await this.page.evaluate(() => {
+        const selectors = [
+          ".a4cQT",
+          ".TBnnec",
+          ".CNusmb",
+          ".iOzk7",
+          "[jsname='tgaKEf']",
+          "[data-message-text]",
+          "[class*='caption']",
+          "[class*='Caption']",
+          "[class*='transcript']",
+        ];
+        for (const sel of selectors) {
+          if (document.querySelector(sel)) return true;
+        }
+        return false;
+      });
+
+      if (!captionsFound) {
+        // try keyboard toggle a couple more times
+        for (let i = 0; i < 3; i++) {
+          await this.page.keyboard.press("c");
+          await this.sleep(1000);
+          const ok = await this.page.evaluate(() => {
+            const selectors = [
+              ".a4cQT",
+              ".TBnnec",
+              ".CNusmb",
+              ".iOzk7",
+              "[jsname='tgaKEf']",
+              "[data-message-text]",
+              "[class*='caption']",
+              "[class*='Caption']",
+              "[class*='transcript']",
+            ];
+            for (const sel of selectors) {
+              if (document.querySelector(sel)) return true;
+            }
+            return false;
+          });
+          if (ok) break;
+        }
+      }
 
       // Start observing DOM for caption container AND active speaker
       await this.page.evaluate(() => {
@@ -713,13 +885,32 @@ class MeetBot {
     this.recognizeStream = connection;
   }
 
+  async _cleanupTempProfile() {
+    if (!this.userDataDir) return;
+    try {
+      fs.rmSync(this.userDataDir, { recursive: true, force: true });
+      console.log("🧹 Removed temp Chrome profile:", this.userDataDir);
+    } catch (err) {
+      console.warn("⚠️ Failed to remove temp profile:", err.message);
+    } finally {
+      this.userDataDir = null;
+    }
+  }
+
   async stop() {
     this.isRunning = false;
     if (this.keepAlive) clearInterval(this.keepAlive);
     if (this.recognizeStream) {
       try { this.recognizeStream.close(); } catch (_) {}
     }
-    if (this.browser) await this.browser.close();
+    if (this.browser) {
+      try {
+        await this.browser.close();
+      } catch (err) {
+        console.warn("⚠️ Error closing browser:", err.message);
+      }
+    }
+    await this._cleanupTempProfile();
     this.emit("bot-status", { status: "stopped", message: "Bot has left the meeting." });
     return this.transcript;
   }
