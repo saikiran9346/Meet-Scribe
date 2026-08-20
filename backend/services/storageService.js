@@ -36,21 +36,34 @@ async function getMeeting(userId, sessionId) {
   }
 }
 
-// List all meetings for user
+// List all meetings for user (summary cards)
 async function listMeetings(userId) {
   try {
-    const snap = await db
-      .collection("meetings")
-      .where("userId", "==", userId)
-      .get();
+    const map = new Map();
 
-    const meetings = snap.docs.map((d) => ({
-      sessionId:       d.data().sessionId,
-      title:           d.data().title,
-      overview:        d.data().overview,
-      sentiment:       d.data().sentiment,
-      createdAt:       d.data().createdAt,
-      transcriptCount: d.data().transcriptCount,
+    // Query user's specific meetings
+    if (userId && userId !== "test-user") {
+      const snapUser = await db.collection("meetings").where("userId", "==", userId).get();
+      snapUser.docs.forEach((d) => map.set(d.id, d.data()));
+    }
+
+    // Also include dev/test-user meetings
+    const snapTest = await db.collection("meetings").where("userId", "==", "test-user").get();
+    snapTest.docs.forEach((d) => map.set(d.id, d.data()));
+
+    // Fallback: If map is still empty, fetch the most recent meetings
+    if (map.size === 0) {
+      const snapAll = await db.collection("meetings").limit(50).get();
+      snapAll.docs.forEach((d) => map.set(d.id, d.data()));
+    }
+
+    const meetings = Array.from(map.values()).map((d) => ({
+      sessionId:       d.sessionId,
+      title:           d.title || "Meeting Summary",
+      overview:        d.overview || (d.summary?.overview) || "",
+      sentiment:       d.sentiment || (d.summary?.sentiment) || "neutral",
+      createdAt:       d.createdAt || new Date().toISOString(),
+      transcriptCount: d.transcriptCount || (d.transcript?.length) || 0,
     }));
 
     // Sort by date newest first
@@ -58,6 +71,33 @@ async function listMeetings(userId) {
     return meetings;
   } catch (err) {
     console.error("❌ Error listing meetings:", err.message);
+    return [];
+  }
+}
+
+// Get all full meetings with complete summaries & action items for Cross-Meeting AI analysis
+async function getFullMeetingsForUser(userId) {
+  try {
+    const map = new Map();
+
+    if (userId && userId !== "test-user") {
+      const snapUser = await db.collection("meetings").where("userId", "==", userId).get();
+      snapUser.docs.forEach((d) => map.set(d.id, d.data()));
+    }
+
+    const snapTest = await db.collection("meetings").where("userId", "==", "test-user").get();
+    snapTest.docs.forEach((d) => map.set(d.id, d.data()));
+
+    if (map.size === 0) {
+      const snapAll = await db.collection("meetings").limit(50).get();
+      snapAll.docs.forEach((d) => map.set(d.id, d.data()));
+    }
+
+    const meetings = Array.from(map.values());
+    meetings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    return meetings;
+  } catch (err) {
+    console.error("❌ Error fetching full meetings for user:", err.message);
     return [];
   }
 }
@@ -252,6 +292,7 @@ module.exports = {
   saveMeeting,
   getMeeting,
   listMeetings,
+  getFullMeetingsForUser,
   deleteMeeting,
   getShareLink,
   getPdfLink,

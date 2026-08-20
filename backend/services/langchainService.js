@@ -243,9 +243,99 @@ async function chatWithMeeting(sessionId, userMessage, transcriptEntries, summar
   };
 }
 
+async function chatAcrossAllMeetings(userMessage, conversationHistory = [], allMeetings = []) {
+  if (!allMeetings || allMeetings.length === 0) {
+    return {
+      answer: "You don't have any saved meetings in your dashboard yet. Once you complete and save a meeting, you can ask me questions across all of your meetings!",
+      referencedMeetings: [],
+    };
+  }
+
+  // Build structured, rich knowledge context from all meetings
+  const meetingsContext = allMeetings.map((m, idx) => {
+    const title = m.title || "Untitled Meeting";
+    const date = m.createdAt
+      ? new Date(m.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" })
+      : "Recent Date";
+    const summary = m.summary || {};
+    const overview = summary.overview || m.overview || "No overview recorded.";
+    const decisions = Array.isArray(summary.keyDecisions) && summary.keyDecisions.length > 0
+      ? summary.keyDecisions.map(d => `  * ${d}`).join("\n")
+      : "  * None recorded";
+    const actions = Array.isArray(summary.actionItems) && summary.actionItems.length > 0
+      ? summary.actionItems.map(a => `  * [Priority: ${a.priority || 'medium'}] ${a.task} (Owner: ${a.owner || 'Team'})`).join("\n")
+      : "  * None recorded";
+    const speakers = Array.isArray(summary.speakerBreakdown) && summary.speakerBreakdown.length > 0
+      ? summary.speakerBreakdown.map(s => `  * ${s.speaker}: ${s.summary}`).join("\n")
+      : "  * Not recorded";
+
+    return `=== MEETING #${idx + 1}: "${title}" (Session ID: ${m.sessionId}) ===
+Date & Time: ${date}
+Overview:
+${overview}
+
+Decisions Made:
+${decisions}
+
+Action Items:
+${actions}
+
+Speaker Contributions:
+${speakers}`;
+  }).join("\n\n----------------------------------------\n\n");
+
+  const systemPrompt = `You are the Global Cross-Meeting Intelligence Assistant for MeetScribe.
+You have complete access to the user's saved meeting knowledge base.
+
+YOUR MISSION:
+1. Synthesize insights across multiple meetings (e.g. tracking how decisions, projects, or topics progressed over time).
+2. Query action items, task ownership, and commitments across all meetings.
+3. Compare perspectives between different meetings or speakers.
+4. Always cite your sources explicitly whenever referencing a meeting, using the format: **[Meeting: "Title" (Date)]**.
+
+CRITICAL INSTRUCTIONS:
+- Base your answers strictly on the provided meeting records.
+- If information was not discussed in any of the recorded meetings, state that clearly and politely.
+- Format your response with clear markdown headings, bullet points, and bold text for maximum readability.
+
+USER'S RECORDED MEETINGS KNOWLEDGE BASE:
+${meetingsContext}`;
+
+  const apiMessages = [
+    { role: "system", content: systemPrompt },
+    ...conversationHistory.slice(-8).map(msg => ({
+      role: msg.role === "user" ? "user" : "assistant",
+      content: msg.content,
+    })),
+    { role: "user", content: userMessage }
+  ];
+
+  const assistantAnswer = await callGroqAPI(apiMessages, false);
+
+  // Extract referenced meetings
+  const referenced = [];
+  for (const m of allMeetings) {
+    if (
+      assistantAnswer.toLowerCase().includes((m.title || "").toLowerCase()) ||
+      (m.sessionId && assistantAnswer.includes(m.sessionId))
+    ) {
+      referenced.push({
+        sessionId: m.sessionId,
+        title: m.title || "Meeting",
+        createdAt: m.createdAt,
+      });
+    }
+  }
+
+  return {
+    answer: assistantAnswer,
+    referencedMeetings: referenced,
+  };
+}
+
 function getChatHistory(sessionId) {
   if (!chatSessions.has(sessionId)) return [];
-  return chatSessions.get(sessionId).messages;
+  return chatSessions.get(sessionId).messages || [];
 }
 
 function clearChatSession(sessionId) {
@@ -257,6 +347,7 @@ module.exports = {
   summarizeTranscript,
   initChatSession,
   chatWithMeeting,
+  chatAcrossAllMeetings,
   getChatHistory,
   clearChatSession,
 };

@@ -1,11 +1,12 @@
 const express = require("express");
 const router = express.Router();
-const { db } = require("../middleware/auth");
+const { db, admin } = require("../middleware/auth");
 const { v4: uuidv4 } = require("uuid");
 const MeetBot = require("../bot/meetBot");
 const {
   summarizeTranscript,
   chatWithMeeting,
+  chatAcrossAllMeetings,
   getChatHistory,
   clearChatSession,
   initChatSession,
@@ -14,12 +15,29 @@ const {
   saveMeeting,
   getMeeting,
   listMeetings,
+  getFullMeetingsForUser,
   deleteMeeting,
   getShareLink,
   getPdfLink,
   getPdfBuffer,
   generatePdf,
 } = require("../services/storageService");
+
+// Optional Auth resolver: extract user from Bearer token
+router.use(async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.split("Bearer ")[1];
+    if (token && token !== "null" && token !== "undefined") {
+      try {
+        req.user = await admin.auth().verifyIdToken(token);
+      } catch (e) {
+        req.user = null;
+      }
+    }
+  }
+  next();
+});
 
 // In-memory active bot sessions { sessionId: MeetBot }
 const activeBots = new Map();
@@ -282,6 +300,27 @@ router.post("/meetings/:sessionId/chat", async (req, res) => {
 router.get("/meetings/:sessionId/chat", (req, res) => {
   const history = getChatHistory(req.params.sessionId);
   res.json({ messages: history });
+});
+
+// ─── CROSS-MEETING GLOBAL AI CHAT ─────────────────────────────────────────────
+
+// Send message across all user meetings
+router.post("/chat/global", async (req, res) => {
+  const { message, history } = req.body;
+  const userId = req.user?.uid || "test-user";
+
+  if (!message?.trim()) {
+    return res.status(400).json({ error: "Message is required" });
+  }
+
+  try {
+    const allMeetings = await getFullMeetingsForUser(userId);
+    const result = await chatAcrossAllMeetings(message.trim(), history || [], allMeetings);
+    res.json(result);
+  } catch (err) {
+    console.error("Global cross-meeting chat error:", err.message);
+    res.status(500).json({ error: err.message || "Failed to process cross-meeting query" });
+  }
 });
 
 // ─── SHARE + PDF ──────────────────────────────────────────────────────────────

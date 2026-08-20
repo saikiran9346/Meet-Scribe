@@ -28,6 +28,7 @@ export function useApi() {
     deleteMeeting:    (sessionId)          => req("DELETE",`/meetings/${sessionId}`),
     sendChat:         (sessionId, message) => req("POST", `/meetings/${sessionId}/chat`, { message }),
     getChatHistory:   (sessionId)          => req("GET",  `/meetings/${sessionId}/chat`),
+    sendGlobalChat:   (message, history)   => req("POST", "/chat/global", { message, history }),
     getShareLink:     (sessionId)          => req("POST", `/meetings/${sessionId}/share`),
     getPdfLink:       (sessionId)          => req("GET",  `/meetings/${sessionId}/pdf`),
   };
