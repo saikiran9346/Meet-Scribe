@@ -1,10 +1,108 @@
 require("dotenv").config();
 const puppeteer = require("puppeteer");
-const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+
+// Helper: Convert PCM16 buffer to WAV format with 44-byte standard header
+function pcm16ToWav(pcmBuffer, sampleRate = 16000, numChannels = 1) {
+  const byteRate = sampleRate * numChannels * 2;
+  const blockAlign = numChannels * 2;
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
+
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16); // Subchunk1Size
+  header.writeUInt16LE(1, 20);  // AudioFormat (PCM)
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34); // BitsPerSample
+  header.write("data", 36);
+  header.writeUInt32LE(dataSize, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+// Helper: Simple Energy Voice Activity Detection (VAD) to skip silence
+function hasAudioActivity(pcmBuffer, threshold = 150) {
+  let sum = 0;
+  const numSamples = Math.floor(pcmBuffer.length / 2);
+  if (numSamples === 0) return false;
+  for (let i = 0; i < pcmBuffer.length; i += 2) {
+    const sample = pcmBuffer.readInt16LE(i);
+    sum += Math.abs(sample);
+  }
+  const avg = sum / numSamples;
+  return avg > threshold;
+}
+
+// Candidate Whisper models and endpoints
+const WHISPER_MODELS = ["whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-large-v3-en"];
+let workingWhisperModel = WHISPER_MODELS[0];
+let workingWhisperEndpoint = "https://api.groq.com/openai/v1/audio/translations";
+
+async function translateAudioWithWhisper(wavBuffer) {
+  if (!process.env.GROQ_API_KEY) {
+    console.error("❌ GROQ_API_KEY is missing from environment variables");
+    return null;
+  }
+
+  const endpointsToTry = [
+    workingWhisperEndpoint,
+    "https://api.groq.com/openai/v1/audio/translations",
+    "https://api.groq.com/openai/v1/audio/transcriptions",
+  ];
+
+  const modelsToTry = [
+    workingWhisperModel,
+    ...WHISPER_MODELS.filter(m => m !== workingWhisperModel),
+  ];
+
+  for (const endpoint of [...new Set(endpointsToTry)]) {
+    for (const modelName of modelsToTry) {
+      try {
+        const formData = new FormData();
+        const audioBlob = new Blob([wavBuffer], { type: "audio/wav" });
+        formData.append("file", audioBlob, "audio.wav");
+        formData.append("model", modelName);
+        formData.append("response_format", "json");
+
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+          },
+          body: formData,
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          workingWhisperModel = modelName;
+          workingWhisperEndpoint = endpoint;
+          return result.text?.trim() || null;
+        }
+
+        const errText = await response.text();
+        if (errText.includes("model_not_found") || errText.includes("does not exist") || response.status === 404) {
+          console.warn(`⚠️ Whisper model '${modelName}' at '${endpoint}' not found, trying fallback...`);
+          continue;
+        }
+
+        console.warn(`Groq Whisper API warning (${response.status}):`, errText);
+      } catch (err) {
+        console.warn(`Fetch error for ${modelName}:`, err.message);
+      }
+    }
+  }
+
+  return null;
+}
 
 class MeetBot {
   constructor(sessionId, meetUrl, io) {
@@ -15,14 +113,13 @@ class MeetBot {
     this.page = null;
     this.transcript = [];
     this.isRunning = false;
-    this.recognizeStream = null;
-    this.keepAlive = null;
     this.participantNames = [];
     this._currentSpeaker = null;
     this._lastSpeaker = null;
     this._lastEntryId = null;
-    this.chunksSent = 0;
-    this._audioQueue = []; // Buffer for audio chunks before Deepgram connects
+    this._audioBufferList = [];
+    this._isProcessingAudio = false;
+    this._whisperInterval = null;
     this.userDataDir = null;
   }
 
@@ -134,30 +231,14 @@ class MeetBot {
     });
     this.page.on("error", (err) => console.error("❌ Page error:", err.message));
 
-    // Expose functions
-    await this.page.exposeFunction("sendAudioChunk", async (base64Chunk) => {
-      const buffer = Buffer.from(base64Chunk, "base64");
-
-      if (this.recognizeStream && this.recognizeStream.readyState === 1) {
-        // Flush queued audio first
-        while (this._audioQueue.length > 0) {
-          const chunk = this._audioQueue.shift();
-          this.recognizeStream.send(chunk);
-          this.chunksSent++;
-        }
-        // Send current chunk
-        this.recognizeStream.send(buffer);
-        this.chunksSent++;
-        if (this.chunksSent % 50 === 0) {
-          console.log(`📤 Sent ${this.chunksSent} audio chunks`);
-        }
-      } else {
-        // Queue audio for when stream connects (max ~5 minutes of audio buffer)
-        if (this._audioQueue.length < 1500) {
-          this._audioQueue.push(buffer);
-        } else {
-          console.log(`⚠️ Audio queue full (${this._audioQueue.length} chunks), dropping oldest`);
-        }
+    // Expose audio chunk receiver
+    await this.page.exposeFunction("sendAudioChunk", (base64Chunk) => {
+      if (!this.isRunning) return;
+      try {
+        const buffer = Buffer.from(base64Chunk, "base64");
+        this._audioBufferList.push(buffer);
+      } catch (err) {
+        console.error("Audio chunk decode error:", err.message);
       }
     });
 
@@ -212,7 +293,7 @@ class MeetBot {
                 binary += String.fromCharCode(uint8[j]);
               }
               count++;
-              if (count % 100 === 0) console.log(`🎵 Chunks: ${count}`);
+              if (count % 100 === 0) console.log(`🎵 Chunks captured: ${count}`);
               if (typeof window.sendAudioChunk === "function") {
                 window.sendAudioChunk(btoa(binary));
               }
@@ -298,128 +379,116 @@ class MeetBot {
 
       if (
         pageText.includes("You can't join this video call") &&
-        !pageText.includes("Join now") &&
-        !pageText.includes("Ask to join")
+        pageText.includes("wrong account")
       ) {
-        this.emit("bot-status", { status: "error", message: "Can't join this meeting." });
+        console.error("❌ Google Workspace domain restriction detected!");
+        this.emit("bot-status", {
+          status: "error",
+          message:
+            "This Google Meet requires an organizational account (@school/company domain).",
+        });
         return;
       }
 
-      await this.sleep(2000);
-
-      // Enter name (if required)
-      try {
-        const nameInput =
-          (await this.page.$('input[aria-label="Your name"]')) ||
-          (await this.page.$('input[placeholder="Your name"]'));
-        if (nameInput) {
-          await nameInput.click({ clickCount: 3 });
-          await nameInput.type("AI Scribe");
-          console.log("✅ Name entered");
+      // Pre-join muting mic & camera
+      await this.page.evaluate(() => {
+        const buttons = Array.from(
+          document.querySelectorAll("button, div[role='button'], div[data-is-muted]")
+        );
+        for (const b of buttons) {
+          const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+          if (
+            aria.includes("turn off microphone") ||
+            (aria.includes("microphone") && !aria.includes("on"))
+          ) {
+            b.click();
+          }
+          if (
+            aria.includes("turn off camera") ||
+            (aria.includes("camera") && !aria.includes("on"))
+          ) {
+            b.click();
+          }
         }
-      } catch (_) {}
-
-      // Turn off mic
-      try {
-        await this.page.evaluate(() => {
-          const btn = Array.from(document.querySelectorAll("button")).find((b) => {
-            const l = b.getAttribute("aria-label") || "";
-            return (l.includes("microphone") || l.includes("mic")) && !l.includes("Leave");
-          });
-          if (btn) btn.click();
-        });
-        await this.sleep(500);
-        console.log("✅ Mic off");
-      } catch (_) {}
-
-      // Turn off camera
-      try {
-        await this.page.evaluate(() => {
-          const btn = Array.from(document.querySelectorAll("button")).find((b) => {
-            const l = b.getAttribute("aria-label") || "";
-            return (l.includes("camera") || l.includes("video")) && !l.includes("Leave");
-          });
-          if (btn) btn.click();
-        });
-        await this.sleep(500);
-        console.log("✅ Camera off");
-      } catch (_) {}
-
-      await this.sleep(1500);
+      });
+      console.log("✅ Mic off");
+      console.log("✅ Camera off");
 
       this.emit("bot-status", {
         status: "joining",
-        message: "Please click 'Join now' in the browser window!",
+        message: "Please click 'Ask to join' or 'Join now' in the browser window!",
       });
 
       console.log("⏳ Waiting for user to click Join...");
-
-      let inMeeting = false;
-      for (let i = 0; i < 150; i++) {
-        await this.sleep(2000);
-        try {
-          const state = await this.page.evaluate(() => {
-            const text = document.body?.innerText || "";
-            return {
-              inMeeting:
-                text.includes("Leave call") ||
-                text.includes("Mute microphone") ||
-                text.includes("Turn on microphone"),
-              leftMeeting: text.includes("You left") || text.includes("Call ended"),
-            };
-          });
-
-          if (state.inMeeting) {
-            inMeeting = true;
-            console.log("✅ User joined meeting!");
-            this.emit("bot-status", {
-              status: "joined",
-              message: "Joined! Transcription starting...",
-            });
-            break;
-          }
-
-          if (state.leftMeeting) {
-            this.emit("bot-status", {
-              status: "error",
-              message: "Meeting ended.",
-            });
-            return;
-          }
-
-          if (i % 15 === 0 && i > 0) {
-            this.emit("bot-status", {
-              status: "joining",
-              message: "Please click Join in the browser window!",
-            });
-          }
-        } catch (_) {}
+      const joined = await this._waitForJoin();
+      if (!joined) {
+        throw new Error("Timeout waiting for user to join the meeting");
       }
 
-      if (inMeeting) {
-        await this.sleep(2000);
-        await this._enableCaptions();
-        await this.sleep(2000);
-        await this._startTranscription();
-      } else {
-        this.emit("bot-status", {
-          status: "error",
-          message: "Timed out waiting for you to join the meeting.",
-        });
-      }
+      console.log("✅ User joined meeting!");
+      this.emit("bot-status", {
+        status: "joined",
+        message: "In meeting! Capturing and translating speech...",
+      });
+
+      await this.sleep(3000);
+      await this._ensureAudioPlaying();
+      await this._startAudioPipeline();
+
     } catch (err) {
       console.error("❌ Join error:", err.message);
-      this.emit("bot-status", { status: "error", message: "Failed to join: " + err.message });
+      this.emit("bot-status", { status: "error", message: err.message });
+      throw err;
     }
   }
 
-  async _startTranscription() {
-    console.log("🎤 Starting transcription...");
-    // Ensure remote audio elements are unmuted and playing
-    await this._ensureAudioPlaying();
+  async _waitForJoin() {
+    const MAX_WAIT = 5 * 60 * 1000;
+    const CHECK_INTERVAL = 2000;
+    let elapsed = 0;
 
-    // Wait for at least one incoming audio track from the page's RTCPeerConnection
-    const MAX_WAIT = 20000; // 20s
+    while (elapsed < MAX_WAIT) {
+      try {
+        const inMeeting = await this.page.evaluate(() => {
+          const leaveButtons = Array.from(
+            document.querySelectorAll("button, div[role='button']")
+          ).filter((b) => {
+            const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+            const text = (b.innerText || "").toLowerCase();
+            return (
+              aria.includes("leave call") ||
+              aria.includes("leave meeting") ||
+              text.includes("leave call") ||
+              b.getAttribute("data-call-ended") !== null
+            );
+          });
+          const hasControls = document.querySelector("[data-meeting-title]") !== null ||
+                              document.querySelector("[data-call-ended]") !== null ||
+                              document.querySelector("[data-self-name]") !== null;
+          return leaveButtons.length > 0 || hasControls;
+        });
+
+        if (inMeeting) return true;
+      } catch (_) {}
+
+      await this.sleep(CHECK_INTERVAL);
+      elapsed += CHECK_INTERVAL;
+
+      if (elapsed % 20000 === 0) {
+        this.emit("bot-status", {
+          status: "joining",
+          message: `Waiting for join (${Math.floor(elapsed / 1000)}s) — Please click 'Ask to join' or 'Join now' in Chrome!`,
+        });
+      }
+    }
+    return false;
+  }
+
+  async _startAudioPipeline() {
+    console.log("🎤 Starting Whisper translation pipeline...");
+    this.emit("bot-status", { status: "listening", message: "Listening & Translating..." });
+
+    const MAX_WAIT = 15000;
     const CHECK_INTERVAL = 1000;
     let waited = 0;
     while (waited < MAX_WAIT) {
@@ -434,34 +503,25 @@ class MeetBot {
       waited += CHECK_INTERVAL;
     }
 
-    if (waited >= MAX_WAIT) {
-      console.warn("⚠️ No incoming audio tracks detected before transcription start");
-      this.emit("bot-status", { status: "error", message: "No audio captured from meeting (check Meet audio settings)." });
-    }
-
-    await this._connectDeepgram();
+    this._startWhisperAudioProcessor();
     this._startParticipantScraper();
     await this._enableCaptions();
-    console.log("✅ Transcription pipeline ready");
+    console.log("✅ Transcription & Translation pipeline ready");
   }
 
   async _ensureAudioPlaying() {
     try {
       await this.page.evaluate(() => {
         try {
-          // Unmute any audio/video elements and set volume
           const mediaEls = Array.from(document.querySelectorAll('audio, video'));
           mediaEls.forEach((el) => {
             try {
               el.muted = false;
               if (typeof el.volume === 'number') el.volume = 1.0;
-              if (el.paused) {
-                el.play().catch(() => {});
-              }
+              if (el.paused) el.play().catch(() => {});
             } catch (e) {}
           });
 
-          // Also unmute any element with autoplay policies
           const audios = document.getElementsByTagName('audio');
           for (const a of audios) {
             try { a.muted = false; a.volume = 1.0; a.play().catch(() => {}); } catch (e) {}
@@ -477,29 +537,24 @@ class MeetBot {
   async _enableCaptions() {
     console.log("💬 Enabling captions...");
     try {
-      await this.sleep(2000);
-
       const captionEnabled = await this.page.evaluate(async () => {
-        const clickIfVisible = (element) => {
-          if (!element) return false;
-          const rect = element.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            element.click();
-            return true;
-          }
-          return false;
+        const clickIfVisible = (el) => {
+          if (!el) return false;
+          el.scrollIntoView({ block: "center", inline: "center" });
+          el.click();
+          return true;
         };
 
         const hasCaptionButton = () => {
           const buttons = Array.from(document.querySelectorAll("button, div[role='button'], span[role='button']"));
           for (const button of buttons) {
-            const text = (button.innerText || "").trim().toLowerCase();
             const aria = (button.getAttribute("aria-label") || "").trim().toLowerCase();
+            const text = (button.innerText || "").trim().toLowerCase();
             if (
               aria.includes("turn on captions") ||
               aria.includes("turn captions on") ||
               text.includes("turn on captions") ||
-              text.includes("captions") && aria.includes("closed captions")
+              (text.includes("captions") && aria.includes("closed captions"))
             ) {
               return button;
             }
@@ -509,7 +564,6 @@ class MeetBot {
 
         const captionButton = hasCaptionButton();
         if (captionButton) {
-          console.log("🔎 Found captions button, clicking it");
           clickIfVisible(captionButton);
           return true;
         }
@@ -526,76 +580,24 @@ class MeetBot {
             const text = (item.innerText || "").trim().toLowerCase();
             return text.includes("turn on captions") || text.includes("captions");
           });
-          if (menuItem && clickIfVisible(menuItem)) {
-            console.log("🔎 Found captions menu item, clicked it");
-            return true;
-          }
+          if (menuItem && clickIfVisible(menuItem)) return true;
         }
 
         return false;
       });
 
       if (!captionEnabled) {
-        console.log("⚠️ Caption button not found, using keyboard shortcut C");
         await this.page.keyboard.press("c");
         await this.sleep(1000);
       } else {
         await this.sleep(2000);
       }
 
-      console.log("✅ Captions toggle attempted; verifying captions visible...");
-
-      // Wait for caption container to appear (verify captions are on)
-      const captionsFound = await this.page.evaluate(() => {
-        const selectors = [
-          ".a4cQT",
-          ".TBnnec",
-          ".CNusmb",
-          ".iOzk7",
-          "[jsname='tgaKEf']",
-          "[data-message-text]",
-          "[class*='caption']",
-          "[class*='Caption']",
-          "[class*='transcript']",
-        ];
-        for (const sel of selectors) {
-          if (document.querySelector(sel)) return true;
-        }
-        return false;
-      });
-
-      if (!captionsFound) {
-        // try keyboard toggle a couple more times
-        for (let i = 0; i < 3; i++) {
-          await this.page.keyboard.press("c");
-          await this.sleep(1000);
-          const ok = await this.page.evaluate(() => {
-            const selectors = [
-              ".a4cQT",
-              ".TBnnec",
-              ".CNusmb",
-              ".iOzk7",
-              "[jsname='tgaKEf']",
-              "[data-message-text]",
-              "[class*='caption']",
-              "[class*='Caption']",
-              "[class*='transcript']",
-            ];
-            for (const sel of selectors) {
-              if (document.querySelector(sel)) return true;
-            }
-            return false;
-          });
-          if (ok) break;
-        }
-      }
-
-      // Start observing DOM for caption container AND active speaker
+      // Observe DOM for captions to extract active speaker names
       await this.page.evaluate(() => {
         let retryCount = 0;
         const maxRetries = 20;
 
-        // Exposed function to update the current speaker
         window._updateSpeaker = function(name) {
           if (name && name.length > 0 && name.length < 50) {
             if (typeof window.onCaptionUpdate === "function") {
@@ -606,18 +608,10 @@ class MeetBot {
 
         function findAndObserveCaptions() {
           retryCount++;
-
-          // All known Google Meet caption selectors
           const selectors = [
-            ".a4cQT",
-            ".TBnnec",
-            ".CNusmb",
-            ".iOzk7",
-            "[jsname='tgaKEf']",
-            "[data-message-text]",
-            "[class*='caption']",
-            "[class*='Caption']",
-            "[class*='transcript']",
+            ".a4cQT", ".TBnnec", ".CNusmb", ".iOzk7",
+            "[jsname='tgaKEf']", "[data-message-text]", "[class*='caption']",
+            "[class*='Caption']", "[class*='transcript']"
           ];
 
           let container = null;
@@ -631,42 +625,28 @@ class MeetBot {
 
           if (!container) {
             if (retryCount < maxRetries) {
-              console.log(`⚠️ Caption container not found (attempt ${retryCount}/${maxRetries})`);
               setTimeout(findAndObserveCaptions, 3000);
-            } else {
-              console.log("⚠️ Caption container not found after all retries — using speaker detection fallback");
             }
             return;
           }
 
           const nameSelectors = [
-            ".zs7s8d",
-            ".KcIKyf",
-            ".NWpY1d",
-            "[class*='speaker']",
-            "[class*='Speaker']",
-            "[class*='name']",
-            "[jsname='r4nke']",
+            ".zs7s8d", ".KcIKyf", ".NWpY1d", "[class*='speaker']",
+            "[class*='Speaker']", "[class*='name']", "[jsname='r4nke']"
           ];
 
-          // Get the LAST (most recent) speaker name from captions
-          // Google Meet appends new captions at the bottom, so the latest speaker is always last
           function getLatestSpeakerName() {
             for (const sel of nameSelectors) {
               const allEls = container.querySelectorAll(sel);
               if (allEls.length > 0) {
-                // Get the LAST matching element (most recent caption)
                 const lastEl = allEls[allEls.length - 1];
                 const name = lastEl.innerText?.trim();
-                if (name && name.length > 0 && name.length < 50) {
-                  return name;
-                }
+                if (name && name.length > 0 && name.length < 50) return name;
               }
             }
             return null;
           }
 
-          // Watch for DOM changes inside caption container
           const observer = new MutationObserver(() => {
             try {
               const name = getLatestSpeakerName();
@@ -674,26 +654,13 @@ class MeetBot {
             } catch (e) {}
           });
 
-          observer.observe(container, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-          });
+          observer.observe(container, { childList: true, subtree: true, characterData: true });
 
-          // Poll for active speaker every 1 second — more reliable than MutationObserver alone
           setInterval(() => {
             try {
-              // Get the most recent caption speaker name
               let name = getLatestSpeakerName();
-
-              // If no name in caption container, try the active speaker indicator in header
               if (!name) {
-                const headerSelectors = [
-                  "[data-participant-name]",
-                  "[class*='active-speaker']",
-                  "[class*='ActiveSpeaker']",
-                  ".uVSpGf", // Active speaker label in header
-                ];
+                const headerSelectors = ["[data-participant-name]", "[class*='active-speaker']", ".uVSpGf"];
                 for (const sel of headerSelectors) {
                   const el = document.querySelector(sel);
                   if (el && el.innerText?.trim()) {
@@ -702,12 +669,9 @@ class MeetBot {
                   }
                 }
               }
-
               if (name) window._updateSpeaker(name);
             } catch (e) {}
           }, 1000);
-
-          console.log("✅ Caption observer active + polling enabled");
         }
 
         setTimeout(findAndObserveCaptions, 3000);
@@ -719,7 +683,6 @@ class MeetBot {
   }
 
   _startParticipantScraper() {
-    // Fix detached frame — check page is open before scraping
     const scrape = async () => {
       try {
         if (!this.page || this.page.isClosed() || !this.isRunning) return;
@@ -771,118 +734,64 @@ class MeetBot {
     console.log("✅ Participant scraper started");
   }
 
-  async _connectDeepgram() {
-    if (this.keepAlive) clearInterval(this.keepAlive);
+  // Groq Whisper Large-v3 Audio Translation Processor
+  _startWhisperAudioProcessor() {
+    if (this._whisperInterval) clearInterval(this._whisperInterval);
 
-    const url =
-      "wss://api.deepgram.com/v1/listen?model=nova-3&language=en-US&punctuate=true&diarize=true&interim_results=true&encoding=linear16&sample_rate=16000&endpointing=500&smart_format=true&utterance_end_ms=1000&vad_events=true";
+    console.log("✅ Groq Whisper Large-v3 Translation Engine connected (Translating 99+ languages to English)");
 
-    const connection = new WebSocket(url, {
-      headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` },
-    });
+    this._whisperInterval = setInterval(async () => {
+      if (!this.isRunning || this._isProcessingAudio) return;
+      if (this._audioBufferList.length < 8) return; // Wait until ~2.5 seconds of audio chunks accumulate
 
-    connection.on("open", () => {
-      console.log("✅ Deepgram connected");
-      // Flush any queued audio immediately
-      while (this._audioQueue.length > 0) {
-        const chunk = this._audioQueue.shift();
-        connection.send(chunk);
-        this.chunksSent++;
-      }
-      if (this.chunksSent > 0) {
-        console.log(`📤 Flushed ${this.chunksSent} queued audio chunks`);
-      }
-      this.keepAlive = setInterval(() => {
-        if (connection.readyState === 1) {
-          connection.send(Buffer.alloc(3200, 0));
-        }
-      }, 5000);
-    });
+      this._isProcessingAudio = true;
+      const chunksToProcess = this._audioBufferList.splice(0, this._audioBufferList.length);
+      const combinedPcm = Buffer.concat(chunksToProcess);
 
-    connection.on("message", (message) => {
       try {
-        const data = JSON.parse(message.toString());
+        // Skip silent audio chunks
+        if (hasAudioActivity(combinedPcm, 150)) {
+          const wavBuffer = pcm16ToWav(combinedPcm, 16000, 1);
+          
+          const translatedEnglish = await translateAudioWithWhisper(wavBuffer);
 
-        // Handle VAD (voice activity detection) events
-        if (data.type === "UtteranceEnd") {
-          console.log("🎤 Utterance ended");
-          return;
-        }
+          if (translatedEnglish && translatedEnglish.length > 1) {
+            // Ignore repetitive silence hallucination phrases common in Whisper
+            const hallucinations = [
+              "thank you", "thanks for watching", "subtitles by", "translated by",
+              "subscribe to my channel", "bye", "you", "the end", "i'm sorry", "..."
+            ];
+            const lower = translatedEnglish.toLowerCase().trim().replace(/[.,!]/g, "");
+            const isHallucination = hallucinations.some(h => lower === h);
 
-        const transcript = data.channel?.alternatives?.[0]?.transcript;
-        if (!transcript || !transcript.trim()) return;
+            if (!isHallucination) {
+              let speakerName = this._currentSpeaker;
+              if (!speakerName && this.participantNames.length > 0) {
+                speakerName = this.participantNames[0];
+              }
+              if (!speakerName) speakerName = "Speaker 1";
 
-        const isFinal = data.is_final;
-        const words = data.channel?.alternatives?.[0]?.words || [];
+              const entry = {
+                id: uuidv4(),
+                text: translatedEnglish,
+                timestamp: new Date().toISOString(),
+                speaker: speakerName,
+              };
 
-        if (isFinal) {
-          let speakerName = null;
+              this.transcript.push(entry);
+              console.log(`📝 [${speakerName}] (Whisper Translated English):`, entry.text);
+              this.emit("transcript-update", { entry, isFinal: true });
 
-          // Priority 1: Use caption-detected speaker name (Google Meet knows real names)
-          if (this._currentSpeaker) {
-            speakerName = this._currentSpeaker;
-          }
-
-          // Priority 2: Use Deepgram diarization speaker index
-          // Rebuild mapping each time — don't cache forever
-          if (!speakerName && words.length > 0) {
-            const dgSpeaker = words[0].speaker ?? 0;
-
-            // Simple consistent mapping: speaker N -> participantNames[N]
-            if (this.participantNames.length > 0) {
-              speakerName = this.participantNames[dgSpeaker % this.participantNames.length];
+              this._currentSpeaker = null;
             }
-
-            if (!speakerName) {
-              speakerName = `Speaker ${dgSpeaker + 1}`;
-            }
           }
-
-          if (!speakerName) speakerName = "Speaker 1";
-
-          const entry = {
-            id: uuidv4(),
-            text: transcript.trim(),
-            timestamp: new Date().toISOString(),
-            speaker: speakerName,
-          };
-
-          this.transcript.push(entry);
-          console.log(`📝 [${speakerName}] (caption=${this._currentSpeaker || "none"}):`, entry.text);
-          this.emit("transcript-update", { entry, isFinal: true });
-
-          // Clear caption speaker after use so next caption detection can set a new name
-          this._currentSpeaker = null;
-
-        } else {
-          // Interim results — emit for live display
-          this.emit("transcript-update", {
-            text: transcript,
-            isFinal: false,
-            speaker: this._currentSpeaker || "Listening...",
-          });
         }
-      } catch (e) {
-        console.error("❌ Parse error:", e.message);
+      } catch (err) {
+        console.error("❌ Audio translation pipeline error:", err.message);
+      } finally {
+        this._isProcessingAudio = false;
       }
-    });
-
-    connection.on("error", (err) => {
-      console.error("❌ Deepgram error:", err.message);
-      if (this.keepAlive) clearInterval(this.keepAlive);
-    });
-
-    connection.on("close", (code, reason) => {
-      console.log(`🔌 Deepgram closed: ${code}`, reason?.toString() || "");
-      if (this.keepAlive) clearInterval(this.keepAlive);
-      if (this.isRunning) {
-        const delay = code === 1011 ? 3000 : 1000; // Longer delay for server errors
-        console.log(`🔄 Reconnecting in ${delay}ms... (${this.chunksSent} chunks sent so far)`);
-        setTimeout(() => { if (this.isRunning) this._connectDeepgram(); }, delay);
-      }
-    });
-
-    this.recognizeStream = connection;
+    }, 3000);
   }
 
   async _cleanupTempProfile() {
@@ -899,10 +808,7 @@ class MeetBot {
 
   async stop() {
     this.isRunning = false;
-    if (this.keepAlive) clearInterval(this.keepAlive);
-    if (this.recognizeStream) {
-      try { this.recognizeStream.close(); } catch (_) {}
-    }
+    if (this._whisperInterval) clearInterval(this._whisperInterval);
     if (this.browser) {
       try {
         await this.browser.close();

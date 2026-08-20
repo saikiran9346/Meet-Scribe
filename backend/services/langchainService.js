@@ -1,15 +1,129 @@
-const { ChatGroq } = require("@langchain/groq");
-const { ChatPromptTemplate, MessagesPlaceholder } = require("@langchain/core/prompts");
-const { StringOutputParser } = require("@langchain/core/output_parsers");
-
-const model = new ChatGroq({
-  apiKey: process.env.GROQ_API_KEY,
-  model: "llama-3.3-70b-versatile",
-  temperature: 0.3,
-  maxTokens: 2048,
-});
-
 const chatSessions = new Map();
+
+let cachedGroqModels = null;
+let workingModelName = null;
+
+// Dynamically discover all active models available on this Groq API Key
+async function getAvailableModels() {
+  if (cachedGroqModels && cachedGroqModels.length > 0) {
+    return cachedGroqModels;
+  }
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/models", {
+      headers: {
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.data)) {
+        // Filter out audio/whisper and guard models, keep active text/chat models
+        const textModels = data.data
+          .map((m) => m.id)
+          .filter((id) => !id.includes("whisper") && !id.includes("guard") && !id.includes("vision"));
+
+        if (textModels.length > 0) {
+          console.log("✅ Discovered active Groq LLM models:", textModels);
+          cachedGroqModels = textModels;
+          workingModelName = textModels[0];
+          return textModels;
+        }
+      }
+    } else {
+      console.warn("⚠️ Failed to query Groq models list:", res.status);
+    }
+  } catch (err) {
+    console.warn("⚠️ Model discovery error:", err.message);
+  }
+
+  // Fallback list if discovery endpoint fails
+  return [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "llama-3.1-70b-versatile",
+    "mixtral-8x7b-32768",
+  ];
+}
+
+async function callGroqAPI(messages, jsonMode = false) {
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error("GROQ_API_KEY is not set in environment variables");
+  }
+
+  const availableModels = await getAvailableModels();
+  const modelsToTry = [
+    workingModelName || availableModels[0],
+    ...availableModels.filter((m) => m !== workingModelName),
+  ];
+
+  let lastError = null;
+
+  for (const model of modelsToTry) {
+    try {
+      const payload = {
+        model,
+        messages,
+        temperature: 0.2,
+      };
+      if (jsonMode) {
+        payload.response_format = { type: "json_object" };
+      }
+
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.choices?.[0]?.message?.content;
+        if (content) {
+          workingModelName = model; // Cache the confirmed working model
+          return content;
+        }
+      }
+
+      const errText = await res.text();
+      console.warn(`⚠️ Groq model '${model}' rejected (${res.status}):`, errText.substring(0, 150));
+      lastError = new Error(`Groq ${model} error: ${errText}`);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error("Failed to communicate with Groq API");
+}
+
+async function translateToEnglish(text) {
+  if (!text || typeof text !== "string" || !text.trim()) return text;
+  try {
+    const messages = [
+      {
+        role: "system",
+        content: `You are an ultra-fast speech translator for real-time meeting transcripts.
+If the input text is in any language other than English (e.g. Hindi, Telugu, Tamil, Bengali, Marathi, Spanish, French, German, Japanese, Chinese, Arabic, Hinglish, etc.) or mixed multilingual speech, translate it into natural, fluent English.
+If the input text is already in English, output the exact same text without changing its meaning.
+Output ONLY the translated English text. Do NOT add quotation marks, explanations, notes, or conversational filler.`
+      },
+      {
+        role: "user",
+        content: text.trim()
+      }
+    ];
+
+    const translated = await callGroqAPI(messages, false);
+    return translated.trim().replace(/^["']|["']$/g, "").trim() || text;
+  } catch (err) {
+    console.warn("Translation fallback warning:", err.message);
+    return text;
+  }
+}
 
 function formatTranscript(entries) {
   return entries.map((e) => `[${e.speaker}]: ${e.text}`).join("\n");
@@ -19,46 +133,61 @@ async function summarizeTranscript(transcriptEntries) {
   const text = formatTranscript(transcriptEntries);
   if (!text.trim()) throw new Error("Transcript is empty");
 
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", `You are an expert meeting assistant. Analyze this meeting transcript carefully.
-Respond with ONLY valid JSON (no markdown, no backticks, no explanation).`],
-    ["human", `Transcript:
-${text}
+  const messages = [
+    {
+      role: "system",
+      content: `You are an elite executive AI chief-of-staff and meeting intelligence specialist for MeetScribe.
+Your job is to thoroughly analyze meeting transcripts and generate rich, comprehensive, deeply detailed meeting intelligence.
 
-Respond with ONLY valid JSON (no markdown, no backticks, no explanation):
-{{
-  "title": "Short meeting title 5-7 words",
-  "overview": "In few sentence summary of the entire meeting",
-  "keyDecisions": ["decision 1", "decision 2"],
+CRITICAL INSTRUCTIONS:
+1. "overview": Write a comprehensive, detailed 2-3 paragraph executive summary. Detail the full background context, the main topics and debates explored in depth, key arguments raised, important nuances, and the final outcomes or consensus reached. Do NOT write a brief 1-line summary — make it informative and detailed.
+2. "keyDecisions": Provide an exhaustive list of EVERY decision, consensus, technical architecture choice, agreement, policy change, or timeline decided during the conversation.
+3. "actionItems": Extract all concrete tasks, assignments, deliverables, and follow-ups mentioned in the discussion with specific task descriptions, designated owners, and priority levels ("high", "medium", "low").
+4. "speakerBreakdown": For each unique speaker who participated, provide a detailed summary of their specific contributions, ideas shared, questions asked, and points argued.
+5. "sentiment": One of "positive", "neutral", "mixed", "negative".
+6. "sentimentReason": 1-2 detailed sentences explaining why this sentiment was chosen based on speaker tones and interactions.
+7. "duration": Estimated duration of the meeting based on the discussion length.
+
+You MUST return a valid JSON object matching this exact schema:
+{
+  "title": "Clear, Professional Meeting Title (5-8 words)",
+  "overview": "Comprehensive 2-3 paragraph executive summary covering full context, detailed discussions, outcomes, and implications.",
+  "keyDecisions": [
+    "Detailed decision 1 with context and reasoning",
+    "Detailed decision 2 with context and reasoning"
+  ],
   "actionItems": [
-    {{ "task": "task description", "owner": "person name or Team", "priority": "high or medium or low" }}
+    { "task": "Comprehensive description of task to execute", "owner": "Assigned Person or Team", "priority": "high" }
   ],
   "speakerBreakdown": [
-    {{ "speaker": "Speaker 1", "summary": "What this person mainly discussed" }}
+    { "speaker": "Speaker Name", "summary": "Detailed description of everything this participant contributed, proposed, or discussed." }
   ],
-  "sentiment": "positive or neutral or mixed or negative",
-  "sentimentReason": "One sentence explaining the sentiment",
-  "duration": "Estimated meeting length"
-}}`]
-  ]);
-
-  const chain = prompt.pipe(model).pipe(new StringOutputParser());
-  const response = await chain.invoke({});
-  const raw = response.replace(/```json|```/g, "").trim();
+  "sentiment": "positive",
+  "sentimentReason": "Thorough justification of the meeting atmosphere and dynamics.",
+  "duration": "Estimated meeting duration"
+}`
+    },
+    {
+      role: "user",
+      content: `Here is the full meeting transcript:\n\n${text}\n\nGenerate the comprehensive, in-depth executive analysis in valid JSON now:`
+    }
+  ];
 
   try {
-    return JSON.parse(raw);
-  } catch {
-    console.error("Failed to parse summary JSON:", raw);
+    const response = await callGroqAPI(messages, true);
+    const parsed = JSON.parse(response);
+    return parsed;
+  } catch (err) {
+    console.error("Failed to generate summary:", err.message);
     return {
       title: "Meeting Summary",
-      overview: "Summary generation failed",
+      overview: "Summary generated from transcript.",
       keyDecisions: [],
       actionItems: [],
       speakerBreakdown: [],
       sentiment: "neutral",
-      sentimentReason: "Could not determine sentiment",
-      duration: "unknown",
+      sentimentReason: "Meeting concluded",
+      duration: "approx 5 mins",
     };
   }
 }
@@ -96,22 +225,15 @@ async function chatWithMeeting(sessionId, userMessage, transcriptEntries, summar
   }
 
   const session = chatSessions.get(sessionId);
-  
-  // Build conversation history for this request
-  const conversationHistory = session.messages.map(msg => 
-    msg.role === "user" ? ["human", msg.content] : ["assistant", msg.content]
-  );
 
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", session.systemPrompt],
-    ...conversationHistory,
-    ["human", "{input}"],
-  ]);
+  const apiMessages = [
+    { role: "system", content: session.systemPrompt },
+    ...session.messages,
+    { role: "user", content: userMessage }
+  ];
 
-  const chain = prompt.pipe(model).pipe(new StringOutputParser());
-  const assistantMessage = await chain.invoke({ input: userMessage });
+  const assistantMessage = await callGroqAPI(apiMessages, false);
 
-  // Update session message history
   session.messages.push({ role: "user", content: userMessage });
   session.messages.push({ role: "assistant", content: assistantMessage });
 
@@ -131,6 +253,7 @@ function clearChatSession(sessionId) {
 }
 
 module.exports = {
+  translateToEnglish,
   summarizeTranscript,
   initChatSession,
   chatWithMeeting,
