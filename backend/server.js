@@ -8,15 +8,14 @@ require("dotenv").config();
 const path = require("path");
 const http = require("http");
 const { Server } = require("socket.io");
+const { logger } = require("./utils/logger");
 const app = require("./app");
 
 try {
-  console.log(
-    "Service account loaded:",
-    require(path.resolve(__dirname, "..", "serviceAccount.json")).project_id
-  );
+  const sa = require(path.resolve(__dirname, "..", "serviceAccount.json"));
+  logger.info("Service account loaded", { action: "auth_init", projectId: sa.project_id });
 } catch (err) {
-  console.warn("Service account not loaded (CI/test environment)");
+  logger.warn("Service account not loaded (CI/test environment)", { action: "auth_init" });
 }
 
 const server = http.createServer(app);
@@ -39,15 +38,15 @@ app.set("io", io);
    ======================= */
 
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
+  logger.info("Socket client connected", { action: "socket_connect", socketId: socket.id });
 
   socket.on("join-session", (sessionId) => {
     socket.join(sessionId);
-    console.log(`Joined session: ${sessionId}`);
+    logger.info(`Socket joined session`, { action: "socket_join", sessionId, socketId: socket.id });
   });
 
   socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
+    logger.info("Socket client disconnected", { action: "socket_disconnect", socketId: socket.id });
   });
 });
 
@@ -111,5 +110,5 @@ app.get("/api/share/:sessionId", async (req, res) => {
 const PORT = process.env.PORT || 8080;
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Backend running on port ${PORT}`);
+  logger.info(`Backend running on port ${PORT}`, { action: "server_startup", port: PORT });
 });

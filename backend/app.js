@@ -9,6 +9,7 @@ require("dotenv").config();
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
+const { requestLogger } = require("./utils/logger");
 const apiRoutes = require("./routes/api");
 
 // Initialize global temp storage
@@ -21,6 +22,7 @@ const app = express();
 app.use(cors());
 app.options("*", cors());
 app.use(express.json());
+app.use(requestLogger);
 
 // Root route
 app.get("/", (req, res) => {

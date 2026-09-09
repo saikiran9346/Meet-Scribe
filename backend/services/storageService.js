@@ -1,8 +1,10 @@
 const { db } = require("../middleware/auth");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
+const { logger, createTraceLogger } = require("../utils/logger");
 
 // Save meeting to Firestore
 async function saveMeeting(userId, sessionId, summary, transcript) {
+  const log = createTraceLogger(sessionId, { action: "storage_save", userId });
   try {
     await db.collection("meetings").doc(sessionId).set({
       sessionId,
@@ -15,15 +17,16 @@ async function saveMeeting(userId, sessionId, summary, transcript) {
       summary,
       createdAt:       new Date().toISOString(),
     });
-    console.log("✅ Meeting saved to Firestore:", sessionId);
+    log.info("Meeting saved to Firestore");
   } catch (err) {
-    console.error("❌ Error saving meeting:", err.message);
+    log.error("Error saving meeting to Firestore", { error: err.message });
     throw err;
   }
 }
 
 // Get one full meeting
 async function getMeeting(userId, sessionId) {
+  const log = createTraceLogger(sessionId, { action: "storage_get", userId });
   try {
     const doc = await db.collection("meetings").doc(sessionId).get();
     if (!doc.exists) return null;
@@ -31,7 +34,7 @@ async function getMeeting(userId, sessionId) {
     if (data.userId !== userId) return null;
     return data;
   } catch (err) {
-    console.error("❌ Error getting meeting:", err.message);
+    log.error("Error getting meeting", { error: err.message });
     return null;
   }
 }

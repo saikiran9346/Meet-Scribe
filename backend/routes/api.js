@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { db, admin } = require("../middleware/auth");
 const { v4: uuidv4 } = require("uuid");
+const { logger, createTraceLogger } = require("../utils/logger");
 const MeetBot = require("../bot/meetBot");
 const {
   summarizeTranscript,
@@ -87,13 +88,13 @@ router.post("/bot/stop", async (req, res) => {
       return res.status(400).json({ error: "No transcript was captured" });
     }
 
-    console.log(`\n=== STOPPING BOT: ${sessionId} ===`);
-    console.log(`Transcript entries: ${transcript.length}`);
-    console.log(`Generating summary...`);
+    const log = createTraceLogger(sessionId, { action: "bot_stop", userId });
+    log.info("Stopping bot session", { transcriptCount: transcript.length });
 
     // AI summarize
+    log.info("Generating AI summary");
     const summary = await summarizeTranscript(transcript);
-    console.log(`✓ Summary generated: ${summary.title}`);
+    log.info("Summary generated", { title: summary.title });
 
     // Store in memory temporarily (don't save to database yet)
     global.tempMeetingData = global.tempMeetingData || {};
@@ -105,11 +106,11 @@ router.post("/bot/stop", async (req, res) => {
       createdAt: new Date().toISOString(),
     };
     
-    console.log(`✓ Meeting data stored in memory (not saved to dashboard yet)`);
+    log.info("Meeting data stored in memory", { action: "temp_storage" });
 
     // Init chatbot session
     initChatSession(sessionId, transcript, summary);
-    console.log(`✓ Chat session initialized`);
+    log.info("Chat session initialized", { action: "chat_init" });
 
     // Respond immediately
     res.json({ 
@@ -121,11 +122,11 @@ router.post("/bot/stop", async (req, res) => {
     // Emit socket event after short delay
     setTimeout(() => {
       io.to(sessionId).emit("summary-ready", { sessionId });
-      console.log(`=== SUMMARY READY: ${sessionId} ===\n`);
+      log.info("Summary ready event emitted", { action: "socket_emit" });
     }, 300);
 
   } catch (err) {
-    console.error("Stop error:", err);
+    logger.error("Stop error", { action: "bot_stop_error", sessionId, error: err.message, stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
@@ -136,17 +137,19 @@ router.post("/meetings/:sessionId/save", async (req, res) => {
   const userId = req.user?.uid || "test-user";
 
   try {
+    const log = createTraceLogger(sessionId, { action: "meeting_save", userId });
+
     // Get from temp storage or already saved
     let meetingData = null;
     
     if (global.tempMeetingData && global.tempMeetingData[sessionId]) {
       meetingData = global.tempMeetingData[sessionId];
-      console.log(`Found meeting in temp storage: ${sessionId}`);
+      log.info("Found meeting in temp storage");
     } else {
       // Try to load from existing saved meetings
       meetingData = await getMeeting(userId, sessionId);
       if (meetingData) {
-        console.log(`Meeting already saved: ${sessionId}`);
+        log.info("Meeting already saved");
         return res.json({ success: true, message: "Meeting is already saved to dashboard", alreadySaved: true });
       }
     }
@@ -155,18 +158,18 @@ router.post("/meetings/:sessionId/save", async (req, res) => {
       return res.status(404).json({ error: "Meeting data not found. The session may have expired." });
     }
 
-    console.log(`Saving meeting ${sessionId} to dashboard (Firestore)...`);
+    log.info("Saving meeting to dashboard (Firestore)");
 
     // Save to Firestore
     await saveMeeting(userId, sessionId, meetingData.summary, meetingData.transcript);
-    console.log(`✓ Meeting saved to Firestore`);
+    log.info("Meeting saved to Firestore");
 
     // Remove from temp storage
     if (global.tempMeetingData) {
       delete global.tempMeetingData[sessionId];
     }
 
-    console.log(`✓✓ Meeting ${sessionId} successfully saved to dashboard!`);
+    log.info("Meeting successfully saved to dashboard", { title: meetingData.summary.title });
 
     res.json({ 
       success: true, 
@@ -174,12 +177,12 @@ router.post("/meetings/:sessionId/save", async (req, res) => {
       title: meetingData.summary.title
     });
   } catch (err) {
-    console.error("Save error:", err);
+    logger.error("Save error", { action: "meeting_save_error", sessionId, error: err.message, stack: err.stack });
     // Even if there's an error, check if the doc was saved
     try {
       const existingData = await getMeeting(userId, sessionId);
       if (existingData) {
-        console.log("Meeting exists in Firestore despite error, returning success");
+        logger.info("Meeting exists in Firestore despite error, returning success", { action: "meeting_save_recovery", sessionId });
         return res.json({ success: true, message: "Meeting saved (with warnings)", title: existingData.summary?.title });
       }
     } catch (_) {}
@@ -201,11 +204,11 @@ router.get("/bot/transcript/:sessionId", (req, res) => {
 router.get("/meetings", async (req, res) => {
   try {
     const userId = req.user?.uid || "test-user";
-    console.log(`📋 GET /meetings - User ID: ${userId}`);
+    logger.info("Listing meetings for user", { action: "meetings_list", userId });
     const meetings = await listMeetings(userId);
     res.json({ meetings });
   } catch (err) {
-    console.error("GET /meetings error:", err.message);
+    logger.error("GET /meetings error", { action: "meetings_list_error", error: err.message });
     res.status(500).json({ error: err.message });
   }
 });
@@ -215,29 +218,31 @@ router.get("/meetings/:sessionId", async (req, res) => {
   try {
     const sessionId = req.params.sessionId;
     const userId = req.user?.uid || "test-user";
-    console.log(`GET /meetings/${sessionId} - Loading meeting data...`);
+    const log = createTraceLogger(sessionId, { action: "meeting_get", userId });
+    log.info("Loading meeting data");
     
     // First check temp storage (for unsaved meetings) - NO userId check needed
     if (global.tempMeetingData && global.tempMeetingData[sessionId]) {
       const data = { ...global.tempMeetingData[sessionId] };
       data._saved = false;
-      console.log("✓ Loaded from TEMP storage:", sessionId);
+      log.info("Loaded from temp storage");
       return res.json(data);
     }
     
     // Try saved meetings (requires userId match)
-    console.log("Not in temp, trying Firestore...");
+    log.info("Checking Firestore for saved meeting");
     const data = await getMeeting(userId, sessionId);
     
     if (data) {
       data._saved = true;
-      console.log("✓ Loaded from Firestore:", sessionId);
+      log.info("Loaded from Firestore");
       return res.json(data);
     }
     
     // Not found anywhere
-    console.error(`✗ Meeting NOT FOUND: ${sessionId}`);
-    console.log("Temp sessions:", global.tempMeetingData ? Object.keys(global.tempMeetingData) : "none");
+    log.warn("Meeting not found", {
+      tempSessions: global.tempMeetingData ? Object.keys(global.tempMeetingData) : "none"
+    });
     
     return res.status(404).json({ 
       error: "Meeting not found", 
@@ -245,7 +250,7 @@ router.get("/meetings/:sessionId", async (req, res) => {
       hint: "The meeting may have been cleared from memory."
     });
   } catch (err) {
-    console.error("Get meeting error:", err);
+    logger.error("Get meeting error", { action: "meeting_get_error", sessionId: req.params.sessionId, error: err.message });
     res.status(500).json({ error: err.message });
   }
 });
@@ -254,11 +259,15 @@ router.get("/meetings/:sessionId", async (req, res) => {
 router.delete("/meetings/:sessionId", async (req, res) => {
   try {
     const userId = req.user?.uid || "test-user";
-    await deleteMeeting(userId, req.params.sessionId);
-    clearChatSession(req.params.sessionId);
+    const sessionId = req.params.sessionId;
+    const log = createTraceLogger(sessionId, { action: "meeting_delete", userId });
+    log.info("Deleting meeting");
+    await deleteMeeting(userId, sessionId);
+    clearChatSession(sessionId);
+    log.info("Meeting deleted successfully");
     res.json({ success: true });
   } catch (err) {
-    console.error("Delete meeting error:", err);
+    logger.error("Delete meeting error", { action: "meeting_delete_error", sessionId: req.params.sessionId, error: err.message });
     res.status(500).json({ error: err.message });
   }
 });
@@ -274,6 +283,9 @@ router.post("/meetings/:sessionId/chat", async (req, res) => {
   if (!message?.trim()) return res.status(400).json({ error: "Message is required" });
 
   try {
+    const log = createTraceLogger(sessionId, { action: "chat_meeting", userId });
+    log.info("Chat message received", { messageLength: message.length });
+
     // Load transcript + summary if session not in memory (e.g. after server restart)
     if (!getChatHistory(sessionId).length) {
       const data = await getMeeting(userId, sessionId);
@@ -292,6 +304,7 @@ router.post("/meetings/:sessionId/chat", async (req, res) => {
 
     res.json(result);
   } catch (err) {
+    logger.error("Meeting chat error", { action: "chat_meeting_error", sessionId, error: err.message });
     res.status(500).json({ error: err.message });
   }
 });
@@ -314,11 +327,12 @@ router.post("/chat/global", async (req, res) => {
   }
 
   try {
+    logger.info("Global cross-meeting chat query", { action: "chat_global", userId, messageLength: message.length });
     const allMeetings = await getFullMeetingsForUser(userId);
     const result = await chatAcrossAllMeetings(message.trim(), history || [], allMeetings);
     res.json(result);
   } catch (err) {
-    console.error("Global cross-meeting chat error:", err.message);
+    logger.error("Global cross-meeting chat error", { action: "chat_global_error", error: err.message });
     res.status(500).json({ error: err.message || "Failed to process cross-meeting query" });
   }
 });
