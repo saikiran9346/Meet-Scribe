@@ -1,0 +1,48 @@
+# ============================================
+# MeetScribe — Docker Compose Configuration
+# ============================================
+# Usage:
+#   docker-compose up --build        (start both services)
+#   docker-compose down              (stop and remove containers)
+#   docker-compose logs -f backend   (follow backend logs)
+# ============================================
+
+version: "3.8"
+
+services:
+  # ─── Backend (Node.js + Express + Puppeteer) ────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: meetscribe-backend
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./serviceAccount.json:/app/../serviceAccount.json:ro
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8080/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1) })"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ─── Frontend (React + Nginx) ──────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: meetscribe-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

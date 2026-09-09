@@ -1,34 +1,24 @@
+/**
+ * MeetScribe Backend — Server Entry Point
+ * 
+ * Imports the Express app from app.js and attaches
+ * Socket.IO and HTTP server listeners.
+ */
 require("dotenv").config();
 const path = require("path");
-const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const cors = require("cors");
-const apiRoutes = require("./routes/api");
-// const { verifyToken } = require("./middleware/auth"); ❌ disabled for now
+const app = require("./app");
 
 console.log(
   "Service account loaded:",
   require(path.resolve(__dirname, "..", "serviceAccount.json")).project_id
 );
 
-// Initialize global temp storage
-global.tempMeetingData = {};
-
-const app = express();
 const server = http.createServer(app);
 
 /* =======================
-   ✅ CORS (SIMPLIFIED FIX)
-   ======================= */
-
-app.use(cors()); // 🔥 allow all (for now)
-app.options("*", cors());
-
-app.use(express.json());
-
-/* =======================
-   ✅ SOCKET.IO
+   SOCKET.IO
    ======================= */
 
 const io = new Server(server, {
@@ -41,20 +31,26 @@ const io = new Server(server, {
 app.set("io", io);
 
 /* =======================
-   ✅ ROUTES
+   SOCKET EVENTS
    ======================= */
 
-// Root route
-app.get("/", (req, res) => {
-  res.send("Backend is running 🚀");
+io.on("connection", (socket) => {
+  console.log("Client connected:", socket.id);
+
+  socket.on("join-session", (sessionId) => {
+    socket.join(sessionId);
+    console.log(`Joined session: ${sessionId}`);
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
+  });
 });
 
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
+/* =======================
+   PUBLIC SHARE ROUTE
+   ======================= */
 
-// PUBLIC SHARE
 app.get("/api/share/:sessionId", async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -105,31 +101,7 @@ app.get("/api/share/:sessionId", async (req, res) => {
 });
 
 /* =======================
-   🚀 MAIN API (NO AUTH FOR NOW)
-   ======================= */
-
-// 🔥 IMPORTANT: removed verifyToken
-app.use("/api", apiRoutes);
-
-/* =======================
-   ✅ SOCKET EVENTS
-   ======================= */
-
-io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
-
-  socket.on("join-session", (sessionId) => {
-    socket.join(sessionId);
-    console.log(`Joined session: ${sessionId}`);
-  });
-
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-  });
-});
-
-/* =======================
-   ✅ START SERVER
+   START SERVER
    ======================= */
 
 const PORT = process.env.PORT || 8080;

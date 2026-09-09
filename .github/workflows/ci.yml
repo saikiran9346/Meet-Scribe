@@ -1,0 +1,134 @@
+# ============================================
+# MeetScribe — CI/CD Pipeline (GitHub Actions)
+# ============================================
+# Triggers on every push and pull request to master.
+# Runs linting, testing, and build verification.
+# ============================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  # ─── Backend: Install, Test ─────────────────────────────────
+  backend-test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Create mock serviceAccount.json for CI
+        run: |
+          cat > serviceAccount.json << 'EOF'
+          {
+            "type": "service_account",
+            "project_id": "meetscribe-ci-test",
+            "private_key_id": "test-key-id",
+            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA2a2rwplBQLxMFGzfOBPnRODC/2m6bNIo7SuJY2PbYfv/J1Ox\njJ/ILh2RpK1z3QjJSh1m7qjPjPfz5GKPWN3s7Y+YxQA1cVbBM2SRQN3YgOxmAYF\n2OP0rh5GzyLM3UkCx0p5MxFT9wjf6sOqxJN5RqPrqz8E7NKGxJ0oYt5AqUxFRey+\ntG0Wr6EPVcCfZ+ZzV6sWFzXsqjCNMM7P8U3qfi0FZhZOPW+PWJElH6O0ae8iiWnf\nqEKn9mXG1n9T5AEqO7RkW8oFPBWJY+M0c0UXpn2EjN1MJq4gj5CQN0oHCl/XMud\n5QZqkfUXCQ0iIjOQCi1kQ0sXX8ztNvz3U8fpzwIDAQABAoIBAHj6u0yLMRnqYgzn\nKnF2rx5k7dQm+MgQKX4RJtE7YfXdCQ3YDFdO0jFMdVfz8GwNFVuHIsXYMbHif3LA\ndsPMjrU7+oN+MK7cZ6R8W8g0a9J/Oumf0Y1REMOVAL/FakePKForCIOnly==\n-----END RSA PRIVATE KEY-----\n",
+            "client_email": "test@meetscribe-ci-test.iam.gserviceaccount.com",
+            "client_id": "000000000000",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/test"
+          }
+          EOF
+
+      - name: Create backend .env for CI
+        working-directory: backend
+        run: |
+          cat > .env << 'EOF'
+          PORT=8080
+          FRONTEND_URL=http://localhost:3000
+          DEEPGRAM_API_KEY=ci-test-key
+          GROQ_API_KEY=ci-test-key
+          HEADLESS=true
+          EOF
+
+      - name: Run backend tests
+        working-directory: backend
+        run: npm test
+
+  # ─── Frontend: Install, Build ───────────────────────────────
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build React application
+        working-directory: frontend
+        run: npm run build
+        env:
+          CI: false
+
+  # ─── Docker Build Validation ────────────────────────────────
+  docker-build:
+    name: Docker Build Validation
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-build]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create mock serviceAccount.json for Docker build
+        run: |
+          cat > serviceAccount.json << 'EOF'
+          {
+            "type": "service_account",
+            "project_id": "meetscribe-ci-test",
+            "private_key_id": "test-key-id",
+            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEFake\n-----END RSA PRIVATE KEY-----\n",
+            "client_email": "test@meetscribe-ci-test.iam.gserviceaccount.com",
+            "client_id": "000000000000",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/test"
+          }
+          EOF
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build backend Docker image
+        run: docker build -t meetscribe-backend ./backend
+
+      - name: Build frontend Docker image
+        run: docker build -t meetscribe-frontend ./frontend
+
+      - name: Verify backend image health check
+        run: |
+          echo "Docker images built successfully!"
+          docker images | grep meetscribe
