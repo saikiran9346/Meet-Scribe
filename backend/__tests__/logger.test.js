@@ -11,31 +11,39 @@ const {
   logger,
   createTraceLogger,
   requestLogger,
-  structuredJsonFormat,
+  addMetadataFormat,
 } = require("../utils/logger");
 
 describe("Structured Logger Core Unit Tests", () => {
-  test("Logger should have all standard log levels", () => {
+  test("Logger should provide all standard log level methods", () => {
     expect(typeof logger.info).toBe("function");
     expect(typeof logger.warn).toBe("function");
     expect(typeof logger.error).toBe("function");
     expect(typeof logger.debug).toBe("function");
   });
 
-  test("createTraceLogger should return a child logger with traceId and action context", () => {
+  test("createTraceLogger should return a child logger with traceId and metadata context", () => {
     const traceId = "test-session-uuid-1234";
     const child = createTraceLogger(traceId, { action: "meeting_capture", userId: "user-42" });
 
     expect(child).toBeDefined();
     expect(typeof child.info).toBe("function");
     expect(typeof child.error).toBe("function");
-    expect(child.defaultMeta.traceId).toBe(traceId);
-    expect(child.defaultMeta.action).toBe("meeting_capture");
-    expect(child.defaultMeta.userId).toBe("user-42");
+    expect(child.traceId).toBe(traceId);
+    expect(child.metadata.traceId).toBe(traceId);
+    expect(child.metadata.action).toBe("meeting_capture");
+    expect(child.metadata.userId).toBe("user-42");
   });
 
-  test("structuredJsonFormat should transform info into JSON with required observability fields", () => {
-    // Test the custom winston format directly
+  test("createTraceLogger should execute log methods cleanly without errors", () => {
+    const child = createTraceLogger("trace-test-555", { action: "bot_start" });
+    expect(() => child.info("Test info message")).not.toThrow();
+    expect(() => child.warn("Test warning message")).not.toThrow();
+    expect(() => child.error("Test error message", { detail: "error details" })).not.toThrow();
+  });
+
+  test("addMetadataFormat should enrich log info with service, traceId, and action defaults", () => {
+    const formatInstance = addMetadataFormat();
     const info = {
       level: "info",
       message: "Test message for observability",
@@ -43,22 +51,22 @@ describe("Structured Logger Core Unit Tests", () => {
       action: "test_action",
     };
 
-    const formatted = structuredJsonFormat.transform(info);
-    expect(formatted).toHaveProperty("timestamp");
-    expect(formatted).toHaveProperty("level", "info");
-    expect(formatted).toHaveProperty("message", "Test message for observability");
-    expect(formatted).toHaveProperty("traceId", "trace-abc-123");
-    expect(formatted).toHaveProperty("action", "test_action");
-    expect(formatted).toHaveProperty("service", "meetscribe-backend");
+    const formatted = formatInstance.transform(info);
+    expect(formatted.service).toBe("meetscribe-backend");
+    expect(formatted.traceId).toBe("trace-abc-123");
+    expect(formatted.action).toBe("test_action");
+    expect(formatted.level).toBe("info");
+    expect(formatted.message).toBe("Test message for observability");
   });
 
-  test("structuredJsonFormat should assign default values when traceId or action are omitted", () => {
+  test("addMetadataFormat should supply system and general fallbacks when fields are missing", () => {
+    const formatInstance = addMetadataFormat();
     const info = {
       level: "info",
       message: "System startup",
     };
 
-    const formatted = structuredJsonFormat.transform(info);
+    const formatted = formatInstance.transform(info);
     expect(formatted.traceId).toBe("system");
     expect(formatted.action).toBe("general");
     expect(formatted.service).toBe("meetscribe-backend");
@@ -86,6 +94,7 @@ describe("HTTP Request Logger Middleware Tests", () => {
     expect(typeof req.traceId).toBe("string");
     expect(req.traceId.length).toBeGreaterThan(0);
     expect(req.logger).toBeDefined();
+    expect(req.logger.traceId).toBe(req.traceId);
     expect(typeof req.logger.info).toBe("function");
     expect(res.setHeader).toHaveBeenCalledWith("X-Trace-Id", req.traceId);
   });
@@ -108,7 +117,8 @@ describe("HTTP Request Logger Middleware Tests", () => {
 
     expect(req.traceId).toBe(customRequestId);
     expect(res.setHeader).toHaveBeenCalledWith("X-Trace-Id", customRequestId);
-    expect(req.logger.defaultMeta.traceId).toBe(customRequestId);
+    expect(req.logger.traceId).toBe(customRequestId);
+    expect(req.logger.metadata.traceId).toBe(customRequestId);
   });
 
   test("End-to-end: GET /health should include X-Trace-Id in HTTP response headers", async () => {

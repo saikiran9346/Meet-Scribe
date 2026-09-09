@@ -4,17 +4,19 @@ const { v4: uuidv4 } = require("uuid");
 const isProduction = process.env.NODE_ENV === "production";
 const isTest = process.env.NODE_ENV === "test";
 
+// Format to inject default observability metadata
+const addMetadataFormat = winston.format((info) => {
+  info.service = info.service || "meetscribe-backend";
+  info.traceId = info.traceId || info.sessionId || "system";
+  info.action = info.action || "general";
+  return info;
+});
+
 // Custom JSON format ensuring required structured fields
 const structuredJsonFormat = winston.format.combine(
   winston.format.timestamp({ format: () => new Date().toISOString() }),
   winston.format.errors({ stack: true }),
-  winston.format((info) => {
-    // Default metadata fields
-    info.service = info.service || "meetscribe-backend";
-    info.traceId = info.traceId || info.sessionId || "system";
-    info.action = info.action || "general";
-    return info;
-  })(),
+  addMetadataFormat(),
   winston.format.json()
 );
 
@@ -49,10 +51,15 @@ const logger = winston.createLogger({
  * @param {object} extraMeta - Additional context (e.g. action, userId)
  */
 function createTraceLogger(traceId, extraMeta = {}) {
-  return logger.child({
-    traceId: traceId || uuidv4(),
+  const actualTraceId = traceId || uuidv4();
+  const meta = {
+    traceId: actualTraceId,
     ...extraMeta,
-  });
+  };
+  const child = logger.child(meta);
+  child.traceId = actualTraceId;
+  child.metadata = meta;
+  return child;
 }
 
 /**
@@ -93,5 +100,6 @@ module.exports = {
   logger,
   createTraceLogger,
   requestLogger,
+  addMetadataFormat,
   structuredJsonFormat,
 };
