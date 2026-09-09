@@ -10,10 +10,14 @@ const http = require("http");
 const { Server } = require("socket.io");
 const app = require("./app");
 
-console.log(
-  "Service account loaded:",
-  require(path.resolve(__dirname, "..", "serviceAccount.json")).project_id
-);
+try {
+  console.log(
+    "Service account loaded:",
+    require(path.resolve(__dirname, "..", "serviceAccount.json")).project_id
+  );
+} catch (err) {
+  console.warn("Service account not loaded (CI/test environment)");
+}
 
 const server = http.createServer(app);
 
