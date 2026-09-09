@@ -110,7 +110,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create mock serviceAccount.json for Docker build
+      - name: Create mock environment files for Docker build
         run: |
           cat > serviceAccount.json << 'EOF'
           {
@@ -126,9 +126,19 @@ jobs:
             "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/test"
           }
           EOF
+          cat > backend/.env << 'EOF'
+          PORT=8080
+          FRONTEND_URL=http://localhost:3000
+          DEEPGRAM_API_KEY=ci-test-key
+          GROQ_API_KEY=ci-test-key
+          HEADLESS=true
+          EOF
+          cat > frontend/.env << 'EOF'
+          REACT_APP_API_URL=http://localhost:8080
+          EOF
 
       - name: Validate Docker Compose configuration
-        run: docker compose config --quiet
+        run: docker compose config
 
       - name: Build backend Docker image
         run: docker build -t meetscribe-backend ./backend
