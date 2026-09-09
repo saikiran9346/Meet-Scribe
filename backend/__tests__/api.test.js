@@ -1,9 +1,9 @@
 /**
- * MeetScribe Backend — API Integration Tests
+ * MeetScribe Backend — API Integration & Route Contract Tests
  * 
- * Tests core REST endpoints using Jest + Supertest.
- * These tests validate route behavior, response schemas,
- * and error handling without requiring a live server.
+ * Validates core REST endpoints, response schemas, error boundaries,
+ * and distributed trace correlation IDs using Jest + Supertest with
+ * a CI-safe in-memory Firestore mock.
  */
 const request = require("supertest");
 const app = require("../app");
