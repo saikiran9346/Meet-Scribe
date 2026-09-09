@@ -32,7 +32,7 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: npm ci
+        run: npm ci || npm install
 
       - name: Create mock serviceAccount.json for CI
         run: |
@@ -41,7 +41,7 @@ jobs:
             "type": "service_account",
             "project_id": "meetscribe-ci-test",
             "private_key_id": "test-key-id",
-            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA2a2rwplBQLxMFGzfOBPnRODC/2m6bNIo7SuJY2PbYfv/J1Ox\njJ/ILh2RpK1z3QjJSh1m7qjPjPfz5GKPWN3s7Y+YxQA1cVbBM2SRQN3YgOxmAYF\n2OP0rh5GzyLM3UkCx0p5MxFT9wjf6sOqxJN5RqPrqz8E7NKGxJ0oYt5AqUxFRey+\ntG0Wr6EPVcCfZ+ZzV6sWFzXsqjCNMM7P8U3qfi0FZhZOPW+PWJElH6O0ae8iiWnf\nqEKn9mXG1n9T5AEqO7RkW8oFPBWJY+M0c0UXpn2EjN1MJq4gj5CQN0oHCl/XMud\n5QZqkfUXCQ0iIjOQCi1kQ0sXX8ztNvz3U8fpzwIDAQABAoIBAHj6u0yLMRnqYgzn\nKnF2rx5k7dQm+MgQKX4RJtE7YfXdCQ3YDFdO0jFMdVfz8GwNFVuHIsXYMbHif3LA\ndsPMjrU7+oN+MK7cZ6R8W8g0a9J/Oumf0Y1REMOVAL/FakePKForCIOnly==\n-----END RSA PRIVATE KEY-----\n",
+            "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA2a2rwplBQLxMFGzfOBPnRODC/2m6bNIo7SuJY2PbYfv/J1Ox\njJ/ILh2RpK1z3QjJSh1m7qjPjPfz5GKPWN3s7Y+YxQA1cVbBM2SRQN3YgOxmAYF\n2OP0rh5GzyLM3UkCx0p5MxFT9wjf6sOqxJN5RqPrqx8E7NKGxJ0oYt5AqUxFRey+\ntG0Wr6EPVcCfZ+ZzV6sWFzXsqjCNMM7P8U3qfi0FZhZOPW+PWJElH6O0ae8iiWnf\nqEKn9mXG1n9T5AEqO7RkW8oFPBWJY+M0c0UXpn2EjN1MJq4gj5CQN0oHCl/XMud\n5QZqkfUXCQ0iIjOQCi1kQ0sXX8ztNvz3U8fpzwIDAQABAoIBAHj6u0yLMRnqYgzn\nKnF2rx5k7dQm+MgQKX4RJtE7YfXdCQ3YDFdO0jFMdVfz8GwNFVuHIsXYMbHif3LA\ndsPMjrU7+oN+MK7cZ6R8W8g0a9J/Oumf0Y1REMOVAL/FakePKForCIOnly==\n-----END RSA PRIVATE KEY-----\n",
             "client_email": "test@meetscribe-ci-test.iam.gserviceaccount.com",
             "client_id": "000000000000",
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
@@ -64,6 +64,14 @@ jobs:
 
       - name: Run backend tests
         working-directory: backend
+        env:
+          CI: "true"
+          NODE_ENV: test
+          PORT: 8080
+          FRONTEND_URL: http://localhost:3000
+          DEEPGRAM_API_KEY: ci-test-key
+          GROQ_API_KEY: ci-test-key
+          HEADLESS: "true"
         run: npm test
 
   # ─── Frontend: Install, Build ───────────────────────────────
@@ -84,7 +92,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        run: npm ci || npm install
 
       - name: Build React application
         working-directory: frontend
